@@ -88,13 +88,36 @@ func NewResolver() *Resolver {
 	}
 }
 
+// logf prints formatted output to the resolver's output stream (if enabled)
+func (r *Resolver) logf(format string, args ...interface{}) {
+	if r.out != nil {
+		fmt.Fprintf(r.out, format, args...)
+	}
+}
+
+// logln prints a line to the resolver's output stream (if enabled)
+func (r *Resolver) logln(args ...interface{}) {
+	if r.out != nil {
+		fmt.Fprintln(r.out, args...)
+	}
+}
+
+// SetQuietMode disables progress output for JSON format
+func (r *Resolver) SetQuietMode(quiet bool) {
+	if quiet {
+		r.out = nil // Disable output
+	} else {
+		r.out = os.Stderr
+	}
+}
+
 // Resolve is the public entry point for starting the dependency resolution process.
 func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]ResolvedDependency, error) {
 	r.visited = make(map[string]bool)
 	r.dependencies = make([]ResolvedDependency, 0)
 	r.imageToChart = make(map[string]string)
 
-	fmt.Fprintf(r.out, "Starting dependency resolution for chart: %s\n", chartName)
+	r.logf("Starting dependency resolution for chart: %s\n", chartName)
 
 	wd, err := os.Getwd()
 	if err != nil {
@@ -109,7 +132,7 @@ func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]Resolved
 	defer func() {
 		err = os.RemoveAll(tmpChartsDir)
 		if err != nil {
-			fmt.Fprintln(r.out, "Failed to remove temporary charts directory")
+			r.logln("Failed to remove temporary charts directory")
 		}
 	}()
 
@@ -130,12 +153,12 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, dir strin
 
 	uniqueID := fmt.Sprintf("%s/%s:%s", repositoryURL, chartName, version)
 	if r.visited[uniqueID] {
-		fmt.Fprintf(r.out, "  -> Skipping already visited chart: %s\n", uniqueID)
+		r.logf("  -> Skipping already visited chart: %s\n", uniqueID)
 		return nil
 	}
 
 	r.visited[uniqueID] = true
-	fmt.Fprintf(r.out, "🔍 Resolving: %s\n", uniqueID)
+	r.logf("🔍 Resolving: %s\n", uniqueID)
 
 	chartRef := fmt.Sprintf("%s/%s", repoName, chartName)
 	saved, _, err := r.chartDownloader.DownloadTo(chartRef, version, dir)
@@ -183,7 +206,7 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, dir strin
 			continue
 		}
 
-		fmt.Fprintf(r.out, "  -> Found dependency: %s:%s\n", dep.Name, dep.Version)
+		r.logf("  -> Found dependency: %s:%s\n", dep.Name, dep.Version)
 
 		err := r.resolveRecursive(dep.Name, dep.Version, dep.Repository, dir)
 		if err != nil {
@@ -318,7 +341,7 @@ func (r *Resolver) ensureRepo(repositoryURL string) (string, error) {
 	}
 
 	if entry == nil {
-		fmt.Fprintf(r.out, "✨ Discovered new repository. Adding and updating: %s\n", repositoryURL)
+		r.logf("✨ Discovered new repository. Adding and updating: %s\n", repositoryURL)
 		parsedURL, err := url.Parse(repositoryURL)
 		if err != nil {
 			return "", fmt.Errorf("invalid repository URL: %s", repositoryURL)
@@ -340,7 +363,7 @@ func (r *Resolver) ensureRepo(repositoryURL string) (string, error) {
 		return "", fmt.Errorf("could not create repo for %s: %w", entry.Name, err)
 	}
 	if _, err := chartRepo.DownloadIndexFile(); err != nil {
-		fmt.Fprintf(r.out, "WARNING: could not update repo %s: %v\n", entry.Name, err)
+		r.logf("WARNING: could not update repo %s: %v\n", entry.Name, err)
 	}
 
 	r.knownRepos[repositoryURL] = true
@@ -401,9 +424,12 @@ All three flags are required for dependency resolution.`,
 			return
 		}
 
-		// Only show progress messages for text format
 		resolver := NewResolver()
-		if format == "text" {
+		
+		// Set quiet mode for JSON format to avoid polluting stdout
+		if format == "json" {
+			resolver.SetQuietMode(true)
+		} else {
 			fmt.Printf("🔍 Resolving dependencies for chart: %s\n", chartName)
 			fmt.Printf("📦 Repository: %s (%s)\n", repoName, repoURL)
 		}
