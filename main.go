@@ -223,7 +223,7 @@ func parseManifestFile(content string) map[string]struct{} {
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "helm-tool",
+	Use:   "hg",
 	Short: "A tool to analyze Helm chart dependencies and images.",
 	Long:  `A powerful CLI tool built with Cobra to inspect Helm charts, list their dependencies, and visualize their dependency graph.`,
 }
