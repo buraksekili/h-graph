@@ -7,12 +7,15 @@ import (
 	"os"
 	"strings"
 
+	"github.com/PaesslerAG/jsonpath"
 	"github.com/spf13/cobra"
+	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/downloader"
 	"helm.sh/helm/v3/pkg/getter"
 	"helm.sh/helm/v3/pkg/repo"
+	"k8s.io/apimachinery/pkg/util/yaml"
 )
 
 type ResolvedDependency struct {
@@ -35,9 +38,9 @@ type Resolver struct {
 	visited      map[string]bool
 	dependencies []ResolvedDependency
 	knownRepos   map[string]bool
+	allImages    map[string]struct{}
 }
 
-// NewResolver creates and initializes a new dependency resolver.
 func NewResolver() *Resolver {
 	settings := cli.New()
 
@@ -57,6 +60,7 @@ func NewResolver() *Resolver {
 		knownRepos:      make(map[string]bool),
 		visited:         make(map[string]bool),
 		dependencies:    make([]ResolvedDependency, 0),
+		allImages:       make(map[string]struct{}),
 	}
 }
 
@@ -119,11 +123,34 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, dir strin
 		return fmt.Errorf("could not load chart from %s: %w", saved, err)
 	}
 
-	r.dependencies = append(r.dependencies, ResolvedDependency{
+	dep := ResolvedDependency{
 		Name:       chart.Name(),
 		Version:    chart.Metadata.Version,
 		Repository: repositoryURL,
-	})
+	}
+
+	r.dependencies = append(r.dependencies, dep)
+
+	actionConfig := new(action.Configuration)
+
+	settings := r.settings
+	if err := actionConfig.Init(settings.RESTClientGetter(), settings.Namespace(), os.Getenv("HELM_DRIVER"), log.Printf); err != nil {
+		log.Fatalf("❌ Failed to initialize action config: %v", err)
+	}
+	templateAction := action.NewInstall(actionConfig)
+	templateAction.DryRun = true
+	templateAction.ReleaseName = dep.Name
+	templateAction.Namespace = "default"
+
+	release, err := templateAction.Run(chart, nil)
+	if err != nil {
+		log.Printf("WARNING: Could not template chart %s: %v", chartRef, err)
+	} else {
+		imagesInChart := parseManifestFile(release.Manifest)
+		for img := range imagesInChart {
+			r.allImages[img] = struct{}{}
+		}
+	}
 
 	for _, dep := range chart.Metadata.Dependencies {
 		if dep.Repository == "" || strings.Contains(dep.Repository, "file://") {
@@ -139,6 +166,60 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, dir strin
 	}
 
 	return nil
+}
+
+func parseManifestFile(content string) map[string]struct{} {
+	const imageQuery = "$..image"
+
+	uniqueImages := make(map[string]struct{})
+
+	documents := strings.Split(content, "---")
+	for _, doc := range documents {
+		if strings.TrimSpace(doc) == "" {
+			continue
+		}
+
+		var data interface{}
+		if err := yaml.Unmarshal([]byte(doc), &data); err != nil {
+			continue
+		}
+
+		// Check if data is a valid structure for jsonpath queries
+		var validData interface{}
+		if slice, ok := data.([]interface{}); ok {
+			validData = slice
+		} else if mapData, ok := data.(map[string]interface{}); ok {
+			validData = mapData
+		} else {
+			// Skip if data is neither a slice nor a map
+			continue
+		}
+
+		// check if kind is Deployment or Pod or Job or StatefulSet or DaemonSet
+		result, err := jsonpath.Get("$.kind", validData)
+		if err != nil {
+			continue
+		}
+
+		if kind, ok := result.(string); !ok || (kind != "Deployment" && kind != "Pod" && kind != "Job" && kind != "StatefulSet" && kind != "DaemonSet") {
+			continue
+		}
+
+		result, err = jsonpath.Get(imageQuery, validData)
+		if err != nil {
+			continue
+		}
+
+		if resultsSlice, ok := result.([]interface{}); ok {
+			for _, item := range resultsSlice {
+				if imageStr, ok := item.(string); ok {
+					uniqueImages[imageStr] = struct{}{}
+				}
+			}
+		}
+	}
+
+	return uniqueImages
 }
 
 var rootCmd = &cobra.Command{
@@ -260,6 +341,9 @@ All three flags are required for dependency resolution.`,
 		fmt.Println("--------------------------------------------------")
 		for _, dep := range resolved {
 			fmt.Println(dep.String())
+		}
+		for img := range resolver.allImages {
+			fmt.Println(img)
 		}
 	},
 }
