@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/spf13/cobra"
 	"helm.sh/helm/v3/pkg/chart/loader"
@@ -20,14 +19,6 @@ type ResolvedDependency struct {
 	Name       string
 	Version    string
 	Repository string
-}
-
-// ChartState holds the current state of chart parameters across sub-commands
-type ChartState struct {
-	Name    string
-	URL     string
-	Version string
-	mutex   sync.RWMutex
 }
 
 func (d ResolvedDependency) String() string {
@@ -274,13 +265,11 @@ All three flags are required for dependency resolution.`,
 }
 
 func init() {
-	// Add flags to the deps command
 	depsCmd.Flags().StringP("name", "n", "", "Chart name (required)")
 	depsCmd.Flags().StringP("repo-name", "r", "", "Repository name (required)")
 	depsCmd.Flags().StringP("repo-url", "u", "", "Repository URL (required)")
 	depsCmd.Flags().StringP("version", "v", "", "Chart version (required)")
 
-	// Mark flags as required
 	depsCmd.MarkFlagRequired("name")
 	depsCmd.MarkFlagRequired("repo-name")
 	depsCmd.MarkFlagRequired("repo-url")
@@ -288,7 +277,6 @@ func init() {
 }
 
 func main() {
-	// Add the main deps command
 	rootCmd.AddCommand(depsCmd)
 
 	if err := rootCmd.Execute(); err != nil {
