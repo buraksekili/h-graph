@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/PaesslerAG/jsonpath"
 	"github.com/spf13/cobra"
@@ -19,13 +21,33 @@ import (
 )
 
 type ResolvedDependency struct {
-	Name       string
-	Version    string
-	Repository string
+	Name       string `json:"name"`
+	Version    string `json:"version"`
+	Repository string `json:"repository"`
 }
 
 func (d ResolvedDependency) String() string {
 	return fmt.Sprintf("-\tName: %s\n\tVersion: %s\n\tRepository: %s", d.Name, d.Version, d.Repository)
+}
+
+type ImageInfo struct {
+	Name   string `json:"name"`
+	Source string `json:"source"`
+}
+
+type DependencyReport struct {
+	Chart struct {
+		Name       string `json:"name"`
+		Version    string `json:"version"`
+		Repository string `json:"repository"`
+	} `json:"chart"`
+	Dependencies []ResolvedDependency `json:"dependencies"`
+	Images       []ImageInfo          `json:"images"`
+	Summary      struct {
+		TotalDependencies int       `json:"total_dependencies"`
+		TotalImages       int       `json:"total_images"`
+		GeneratedAt       time.Time `json:"generated_at"`
+	} `json:"summary"`
 }
 
 type Resolver struct {
@@ -39,6 +61,7 @@ type Resolver struct {
 	dependencies []ResolvedDependency
 	knownRepos   map[string]bool
 	allImages    map[string]struct{}
+	imageToChart map[string]string
 }
 
 func NewResolver() *Resolver {
@@ -61,6 +84,7 @@ func NewResolver() *Resolver {
 		visited:         make(map[string]bool),
 		dependencies:    make([]ResolvedDependency, 0),
 		allImages:       make(map[string]struct{}),
+		imageToChart:    make(map[string]string),
 	}
 }
 
@@ -68,6 +92,7 @@ func NewResolver() *Resolver {
 func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]ResolvedDependency, error) {
 	r.visited = make(map[string]bool)
 	r.dependencies = make([]ResolvedDependency, 0)
+	r.imageToChart = make(map[string]string)
 
 	fmt.Fprintf(r.out, "Starting dependency resolution for chart: %s\n", chartName)
 
@@ -149,6 +174,7 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, dir strin
 		imagesInChart := parseManifestFile(release.Manifest)
 		for img := range imagesInChart {
 			r.allImages[img] = struct{}{}
+			r.imageToChart[img] = dep.Name
 		}
 	}
 
@@ -184,14 +210,12 @@ func parseManifestFile(content string) map[string]struct{} {
 			continue
 		}
 
-		// Check if data is a valid structure for jsonpath queries
 		var validData interface{}
 		if slice, ok := data.([]interface{}); ok {
 			validData = slice
 		} else if mapData, ok := data.(map[string]interface{}); ok {
 			validData = mapData
 		} else {
-			// Skip if data is neither a slice nor a map
 			continue
 		}
 
@@ -220,6 +244,49 @@ func parseManifestFile(content string) map[string]struct{} {
 	}
 
 	return uniqueImages
+}
+
+// GenerateReport creates a structured dependency report
+func (r *Resolver) GenerateReport(chartName, version, repositoryURL string) *DependencyReport {
+	report := &DependencyReport{
+		Dependencies: r.dependencies,
+	}
+
+	// Set chart information
+	report.Chart.Name = chartName
+	report.Chart.Version = version
+	report.Chart.Repository = repositoryURL
+
+	// Convert images map to slice with source information
+	images := make([]ImageInfo, 0, len(r.allImages))
+	for img := range r.allImages {
+		source := r.imageToChart[img]
+		if source == "" {
+			source = chartName // Default to main chart if source unknown
+		}
+		images = append(images, ImageInfo{
+			Name:   img,
+			Source: source,
+		})
+	}
+	report.Images = images
+
+	// Set summary information
+	report.Summary.TotalDependencies = len(r.dependencies)
+	report.Summary.TotalImages = len(images)
+	report.Summary.GeneratedAt = time.Now()
+
+	return report
+}
+
+// OutputJSON outputs the report in JSON format
+func (r *Resolver) OutputJSON(report *DependencyReport) error {
+	jsonData, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal JSON: %w", err)
+	}
+	fmt.Println(string(jsonData))
+	return nil
 }
 
 var rootCmd = &cobra.Command{
@@ -304,6 +371,7 @@ All three flags are required for dependency resolution.`,
 		repoName, _ := cmd.Flags().GetString("repo-name")
 		repoURL, _ := cmd.Flags().GetString("repo-url")
 		version, _ := cmd.Flags().GetString("version")
+		format, _ := cmd.Flags().GetString("format")
 
 		if chartName == "" {
 			fmt.Println("❌ Chart name is required. Use --name flag.")
@@ -322,28 +390,46 @@ All three flags are required for dependency resolution.`,
 			return
 		}
 
+		// Validate format
+		if format != "text" && format != "json" {
+			fmt.Printf("❌ Invalid format '%s'. Supported formats: text, json\n", format)
+			return
+		}
+
 		if err := validateURL(repoURL); err != nil {
 			fmt.Printf("❌ Invalid repository URL: %v\n", err)
 			return
 		}
 
-		fmt.Printf("🔍 Resolving dependencies for chart: %s\n", chartName)
-		fmt.Printf("📦 Repository: %s (%s)\n", repoName, repoURL)
-
+		// Only show progress messages for text format
 		resolver := NewResolver()
+		if format == "text" {
+			fmt.Printf("🔍 Resolving dependencies for chart: %s\n", chartName)
+			fmt.Printf("📦 Repository: %s (%s)\n", repoName, repoURL)
+		}
 
 		resolved, err := resolver.Resolve(chartName, version, repoURL)
 		if err != nil {
 			log.Fatalf("❌ Resolution failed: %v", err)
 		}
 
-		fmt.Println("✅ Dependency resolution complete. Found unique dependencies:")
-		fmt.Println("--------------------------------------------------")
-		for _, dep := range resolved {
-			fmt.Println(dep.String())
-		}
-		for img := range resolver.allImages {
-			fmt.Println(img)
+		switch format {
+		case "json":
+			report := resolver.GenerateReport(chartName, version, repoURL)
+			if err := resolver.OutputJSON(report); err != nil {
+				log.Fatalf("❌ Failed to output JSON: %v", err)
+			}
+		default:
+			fmt.Println("✅ Dependency resolution complete. Found unique dependencies:")
+			fmt.Println("--------------------------------------------------")
+			for _, dep := range resolved {
+				fmt.Println(dep.String())
+			}
+			fmt.Println("\n🐳 Container Images:")
+			fmt.Println("--------------------------------------------------")
+			for img := range resolver.allImages {
+				fmt.Println(img)
+			}
 		}
 	},
 }
@@ -353,6 +439,7 @@ func init() {
 	depsCmd.Flags().StringP("repo-name", "r", "", "Repository name (required)")
 	depsCmd.Flags().StringP("repo-url", "u", "", "Repository URL (required)")
 	depsCmd.Flags().StringP("version", "v", "", "Chart version (required)")
+	depsCmd.Flags().StringP("format", "f", "text", "Output format (text, json)")
 
 	depsCmd.MarkFlagRequired("name")
 	depsCmd.MarkFlagRequired("repo-name")
