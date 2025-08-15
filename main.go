@@ -27,12 +27,21 @@ import (
 )
 
 type ResolvedDependency struct {
-	Name       string `json:"name"`
-	Version    string `json:"version"`
-	Repository string `json:"repository"`
-	IsLocal    bool   `json:"isLocal"`
+	Name        string       `json:"name"`
+	Version     string       `json:"version"`
+	Repository  string       `json:"repository"`
+	currentNode *currentNode `json:"-"`
+	parentDep   *parentDep   `json:"-"`
+}
 
-	chart *chart.Chart `json:"-"`
+type currentNode struct {
+	chart *chart.Chart
+	saved string
+}
+
+type parentDep struct {
+	chart *chart.Chart
+	saved string
 }
 
 func (d ResolvedDependency) String() string {
@@ -141,6 +150,8 @@ func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]Resolved
 		return nil, err
 	}
 
+	r.tmpDirPath = tmpChartsDir
+
 	defer func() {
 		err = os.RemoveAll(tmpChartsDir)
 		if err != nil {
@@ -148,7 +159,7 @@ func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]Resolved
 		}
 	}()
 
-	err = r.resolveRecursive(chartName, version, repositoryURL, tmpChartsDir)
+	err = r.resolveRecursive(chartName, version, repositoryURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve dependencies: %w", err)
 	}
@@ -170,6 +181,7 @@ type exploreReq struct {
 	chartName     string
 	version       string
 	downloadPath  string
+	parentNode    *parentDep
 }
 
 func (e *exploreReq) validate() error {
@@ -221,12 +233,32 @@ func (r *Resolver) exploreNode(req *exploreReq) (*ResolvedDependency, error) {
 		chartURL = req.repositoryURL
 		pull.Version = req.version
 	case strings.HasPrefix(req.repositoryURL, "file://"):
-		return &ResolvedDependency{
+		dep := &ResolvedDependency{
 			Name:       req.chartName,
 			Version:    req.version,
 			Repository: req.repositoryURL,
-			IsLocal:    true,
-		}, errSkipLocalDeps
+		}
+
+		err = chartutil.ExpandFile(req.downloadPath, req.parentNode.saved)
+		if err != nil {
+			return dep, errors.Wrap(errSkipLocalDeps, err.Error())
+		}
+
+		parentNode := absPath(req.parentNode.chart.Name(), req.downloadPath)
+		c, chartPath, err := lookDependenciesInCharts(parentNode, &loadChartReq{
+			baseDir:   parentNode,
+			chartName: req.chartName,
+			repo:      req.repositoryURL,
+		})
+		if err != nil {
+			return dep, errors.Wrap(errSkipLocalDeps, err.Error())
+		}
+
+		dep.currentNode = &currentNode{
+			chart: c,
+			saved: chartPath,
+		}
+		return dep, nil
 	default:
 		if repoFile != nil {
 			for _, repo := range repoFile.Repositories {
@@ -276,19 +308,24 @@ func (r *Resolver) exploreNode(req *exploreReq) (*ResolvedDependency, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not load chart from %s: %w", saved, err)
 	}
+
 	dep := ResolvedDependency{
 		Name:       chart.Name(),
 		Version:    chart.Metadata.Version,
 		Repository: req.repositoryURL,
-		chart:      chart,
+		currentNode: &currentNode{
+			chart: chart,
+			saved: saved,
+		},
 	}
+
 	r.dependencies = append(r.dependencies, dep)
 
 	return &dep, nil
 }
 
 func (r *Resolver) images(dep *ResolvedDependency) error {
-	if dep.chart == nil {
+	if dep.currentNode.chart == nil {
 		return nil
 	}
 
@@ -311,7 +348,7 @@ func (r *Resolver) images(dep *ResolvedDependency) error {
 	templateAction.ReleaseName = dep.Name
 	templateAction.Namespace = "default"
 
-	release, err := templateAction.Run(dep.chart, nil)
+	release, err := templateAction.Run(dep.currentNode.chart, nil)
 	if err != nil {
 		return err
 	}
@@ -326,7 +363,7 @@ func (r *Resolver) images(dep *ResolvedDependency) error {
 }
 
 // resolveRecursive performs the actual recursive dependency resolution.
-func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, baseDir string) error {
+func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, parentNode *parentDep) error {
 	if repositoryURL == "" {
 		return nil
 	}
@@ -348,7 +385,8 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, baseDir s
 		repositoryURL: repositoryURL,
 		chartName:     chartName,
 		version:       version,
-		downloadPath:  baseDir,
+		downloadPath:  r.tmpDirPath,
+		parentNode:    parentNode,
 	})
 	if err != nil {
 		if errors.Is(err, errSkipLocalDeps) {
@@ -359,7 +397,7 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, baseDir s
 		return fmt.Errorf("could not download chart %s:%s from %s: %w", chartRef, version, repositoryURL, err)
 	}
 
-	if dep.chart == nil {
+	if dep.currentNode.chart == nil {
 		return nil
 	}
 
@@ -368,10 +406,14 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, baseDir s
 		return err
 	}
 
-	deps := dep.chart.Metadata.Dependencies
+	deps := dep.currentNode.chart.Metadata.Dependencies
 
 	for _, subDep := range deps {
-		err := r.resolveRecursive(subDep.Name, subDep.Version, subDep.Repository, baseDir)
+		parentNode := parentDep{
+			chart: dep.currentNode.chart,
+			saved: dep.currentNode.saved,
+		}
+		err := r.resolveRecursive(subDep.Name, subDep.Version, subDep.Repository, &parentNode)
 		if err != nil {
 			return err
 		}
