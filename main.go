@@ -3,11 +3,17 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/pkg/errors"
+	"helm.sh/helm/v3/pkg/chart"
+	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v3/pkg/registry"
 
 	"github.com/PaesslerAG/jsonpath"
 	"github.com/spf13/cobra"
@@ -24,6 +30,9 @@ type ResolvedDependency struct {
 	Name       string `json:"name"`
 	Version    string `json:"version"`
 	Repository string `json:"repository"`
+	IsLocal    bool   `json:"isLocal"`
+
+	chart *chart.Chart `json:"-"`
 }
 
 func (d ResolvedDependency) String() string {
@@ -48,6 +57,8 @@ type DependencyReport struct {
 		TotalImages       int       `json:"total_images"`
 		GeneratedAt       time.Time `json:"generated_at"`
 	} `json:"summary"`
+
+	SkippedCharts []ResolvedDependency `json:"skipped_charts"`
 }
 
 type Resolver struct {
@@ -62,6 +73,7 @@ type Resolver struct {
 	knownRepos   map[string]bool
 	allImages    map[string]struct{}
 	imageToChart map[string]string
+	skippedDeps  []ResolvedDependency
 }
 
 func NewResolver() *Resolver {
@@ -85,6 +97,7 @@ func NewResolver() *Resolver {
 		dependencies:    make([]ResolvedDependency, 0),
 		allImages:       make(map[string]struct{}),
 		imageToChart:    make(map[string]string),
+		skippedDeps:     make([]ResolvedDependency, 0),
 	}
 }
 
@@ -102,10 +115,9 @@ func (r *Resolver) logln(args ...interface{}) {
 	}
 }
 
-// SetQuietMode disables progress output for JSON format
 func (r *Resolver) SetQuietMode(quiet bool) {
 	if quiet {
-		r.out = nil // Disable output
+		r.out = nil
 	} else {
 		r.out = os.Stderr
 	}
@@ -144,8 +156,181 @@ func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]Resolved
 	return r.dependencies, nil
 }
 
+func unpackChart(dst, src string) error {
+	err := chartutil.ExpandFile(dst, src)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type exploreReq struct {
+	repositoryURL string
+	chartName     string
+	version       string
+	downloadPath  string
+}
+
+func (e *exploreReq) validate() error {
+	if e == nil {
+		return fmt.Errorf("exploreReq cannot be nil")
+	}
+
+	if e.repositoryURL == "" {
+		return fmt.Errorf("empty repositoryURL")
+	}
+
+	return nil
+}
+
+var errSkipLocalDeps = fmt.Errorf("skip local dependencies")
+
+func (r *Resolver) exploreNode(req *exploreReq) (*ResolvedDependency, error) {
+	err := req.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	tmpChartsDir := req.downloadPath
+
+	pull := action.NewPull()
+	pull.Untar = true
+	pull.UntarDir = tmpChartsDir
+	pull.Settings = cli.New()
+
+	var (
+		regClient *registry.Client
+		chartURL  string
+		username  string
+		password  string
+	)
+
+	repoFile, err := repo.LoadFile(pull.Settings.RepositoryConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	switch {
+	case registry.IsOCI(req.repositoryURL):
+		regClient, err = registry.NewClient(registry.ClientOptEnableCache(true))
+		if err != nil {
+			return nil, fmt.Errorf("unable to create the new registry client: %w", err)
+		}
+
+		chartURL = req.repositoryURL
+		pull.Version = req.version
+	case strings.HasPrefix(req.repositoryURL, "file://"):
+		return &ResolvedDependency{
+			Name:       req.chartName,
+			Version:    req.version,
+			Repository: req.repositoryURL,
+			IsLocal:    true,
+		}, errSkipLocalDeps
+	default:
+		if repoFile != nil {
+			for _, repo := range repoFile.Repositories {
+				if repo.URL == req.repositoryURL {
+					username = repo.Username
+					password = repo.Password
+				}
+			}
+		}
+
+		chartURL, err = repo.FindChartInAuthAndTLSRepoURL(
+			req.repositoryURL,
+			username,
+			password,
+			req.chartName,
+			req.version,
+			pull.CertFile,
+			pull.KeyFile,
+			pull.CaFile,
+			true,
+			getter.All(pull.Settings),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("unable to pull the helm chart: %w", err)
+		}
+	}
+
+	chartDownloader := downloader.ChartDownloader{
+		Out:              io.Discard,
+		RegistryClient:   regClient,
+		RepositoryConfig: pull.Settings.RepositoryConfig,
+		RepositoryCache:  pull.Settings.RepositoryCache,
+		Verify:           downloader.VerifyNever,
+		Getters:          getter.All(pull.Settings),
+		Options: []getter.Option{
+			getter.WithInsecureSkipVerifyTLS(true),
+			getter.WithBasicAuth(username, password),
+		},
+	}
+
+	saved, _, err := chartDownloader.DownloadTo(chartURL, pull.Version, tmpChartsDir)
+	if err != nil {
+		return nil, fmt.Errorf("unable to download the helm chart: %w", err)
+	}
+
+	chart, err := loader.Load(saved)
+	if err != nil {
+		return nil, fmt.Errorf("could not load chart from %s: %w", saved, err)
+	}
+	dep := ResolvedDependency{
+		Name:       chart.Name(),
+		Version:    chart.Metadata.Version,
+		Repository: req.repositoryURL,
+		chart:      chart,
+	}
+	r.dependencies = append(r.dependencies, dep)
+
+	return &dep, nil
+}
+
+func (r *Resolver) images(dep *ResolvedDependency) error {
+	if dep.chart == nil {
+		return nil
+	}
+
+	actionConfig := new(action.Configuration)
+	settings := r.settings
+
+	// TODO: look for better way to initialize this
+	err := actionConfig.Init(
+		settings.RESTClientGetter(),
+		settings.Namespace(),
+		os.Getenv("HELM_DRIVER"),
+		func(format string, v ...interface{}) {},
+	)
+	if err != nil {
+		return err
+	}
+
+	templateAction := action.NewInstall(actionConfig)
+	templateAction.DryRun = true
+	templateAction.ReleaseName = dep.Name
+	templateAction.Namespace = "default"
+
+	release, err := templateAction.Run(dep.chart, nil)
+	if err != nil {
+		return err
+	}
+
+	imagesInChart := parseManifestFile(release.Manifest)
+	for img := range imagesInChart {
+		r.allImages[img] = struct{}{}
+		r.imageToChart[img] = dep.Name
+	}
+
+	return nil
+}
+
 // resolveRecursive performs the actual recursive dependency resolution.
-func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, dir string) error {
+func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, baseDir string) error {
+	if repositoryURL == "" {
+		return nil
+	}
+
 	repoName, err := r.ensureRepo(repositoryURL)
 	if err != nil {
 		return err
@@ -153,62 +338,40 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, dir strin
 
 	uniqueID := fmt.Sprintf("%s/%s:%s", repositoryURL, chartName, version)
 	if r.visited[uniqueID] {
-		r.logf("  -> Skipping already visited chart: %s\n", uniqueID)
 		return nil
 	}
 
 	r.visited[uniqueID] = true
-	r.logf("🔍 Resolving: %s\n", uniqueID)
 
 	chartRef := fmt.Sprintf("%s/%s", repoName, chartName)
-	saved, _, err := r.chartDownloader.DownloadTo(chartRef, version, dir)
+	dep, err := r.exploreNode(&exploreReq{
+		repositoryURL: repositoryURL,
+		chartName:     chartName,
+		version:       version,
+		downloadPath:  baseDir,
+	})
 	if err != nil {
+		if errors.Is(err, errSkipLocalDeps) {
+			r.skippedDeps = append(r.skippedDeps, *dep)
+			return nil
+		}
+
 		return fmt.Errorf("could not download chart %s:%s from %s: %w", chartRef, version, repositoryURL, err)
 	}
 
-	chart, err := loader.Load(saved)
+	if dep.chart == nil {
+		return nil
+	}
+
+	err = r.images(dep)
 	if err != nil {
-		return fmt.Errorf("could not load chart from %s: %w", saved, err)
+		return err
 	}
 
-	dep := ResolvedDependency{
-		Name:       chart.Name(),
-		Version:    chart.Metadata.Version,
-		Repository: repositoryURL,
-	}
+	deps := dep.chart.Metadata.Dependencies
 
-	r.dependencies = append(r.dependencies, dep)
-
-	actionConfig := new(action.Configuration)
-
-	settings := r.settings
-	if err := actionConfig.Init(settings.RESTClientGetter(), settings.Namespace(), os.Getenv("HELM_DRIVER"), log.Printf); err != nil {
-		log.Fatalf("❌ Failed to initialize action config: %v", err)
-	}
-	templateAction := action.NewInstall(actionConfig)
-	templateAction.DryRun = true
-	templateAction.ReleaseName = dep.Name
-	templateAction.Namespace = "default"
-
-	release, err := templateAction.Run(chart, nil)
-	if err != nil {
-		log.Printf("WARNING: Could not template chart %s: %v", chartRef, err)
-	} else {
-		imagesInChart := parseManifestFile(release.Manifest)
-		for img := range imagesInChart {
-			r.allImages[img] = struct{}{}
-			r.imageToChart[img] = dep.Name
-		}
-	}
-
-	for _, dep := range chart.Metadata.Dependencies {
-		if dep.Repository == "" || strings.Contains(dep.Repository, "file://") {
-			continue
-		}
-
-		r.logf("  -> Found dependency: %s:%s\n", dep.Name, dep.Version)
-
-		err := r.resolveRecursive(dep.Name, dep.Version, dep.Repository, dir)
+	for _, subDep := range deps {
+		err := r.resolveRecursive(subDep.Name, subDep.Version, subDep.Repository, baseDir)
 		if err != nil {
 			return err
 		}
@@ -269,35 +432,33 @@ func parseManifestFile(content string) map[string]struct{} {
 	return uniqueImages
 }
 
-// GenerateReport creates a structured dependency report
 func (r *Resolver) GenerateReport(chartName, version, repositoryURL string) *DependencyReport {
 	report := &DependencyReport{
 		Dependencies: r.dependencies,
 	}
 
-	// Set chart information
 	report.Chart.Name = chartName
 	report.Chart.Version = version
 	report.Chart.Repository = repositoryURL
 
-	// Convert images map to slice with source information
 	images := make([]ImageInfo, 0, len(r.allImages))
 	for img := range r.allImages {
 		source := r.imageToChart[img]
 		if source == "" {
-			source = chartName // Default to main chart if source unknown
+			source = chartName
 		}
 		images = append(images, ImageInfo{
 			Name:   img,
 			Source: source,
 		})
 	}
+
 	report.Images = images
 
-	// Set summary information
 	report.Summary.TotalDependencies = len(r.dependencies)
 	report.Summary.TotalImages = len(images)
 	report.Summary.GeneratedAt = time.Now()
+	report.SkippedCharts = r.skippedDeps
 
 	return report
 }
@@ -320,6 +481,10 @@ var rootCmd = &cobra.Command{
 
 // ensureRepo automatically adds and updates a repository only if it's not already configured.
 func (r *Resolver) ensureRepo(repositoryURL string) (string, error) {
+	if strings.HasPrefix(repositoryURL, "file://") {
+		return repositoryURL, nil
+	}
+
 	if r.knownRepos[repositoryURL] {
 		return r.repoURLToName[repositoryURL], nil
 	}
@@ -362,25 +527,14 @@ func (r *Resolver) ensureRepo(repositoryURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("could not create repo for %s: %w", entry.Name, err)
 	}
-	if _, err := chartRepo.DownloadIndexFile(); err != nil {
-		r.logf("WARNING: could not update repo %s: %v\n", entry.Name, err)
+	if _, err := chartRepo.DownloadIndexFile(); err != nil { // todo: use manager here to update the repo
+		return "", fmt.Errorf("failed to update the repo: %w", err)
 	}
 
 	r.knownRepos[repositoryURL] = true
 	r.repoURLToName[repositoryURL] = entry.Name
 
 	return entry.Name, nil
-}
-
-func validateURL(urlStr string) error {
-	if urlStr == "" {
-		return fmt.Errorf("URL cannot be empty")
-	}
-	_, err := url.Parse(urlStr)
-	if err != nil {
-		return fmt.Errorf("invalid URL format: %w", err)
-	}
-	return nil
 }
 
 var depsCmd = &cobra.Command{
@@ -419,13 +573,8 @@ All three flags are required for dependency resolution.`,
 			return
 		}
 
-		if err := validateURL(repoURL); err != nil {
-			fmt.Printf("❌ Invalid repository URL: %v\n", err)
-			return
-		}
-
 		resolver := NewResolver()
-		
+
 		// Set quiet mode for JSON format to avoid polluting stdout
 		if format == "json" {
 			resolver.SetQuietMode(true)
