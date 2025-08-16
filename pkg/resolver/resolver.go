@@ -181,6 +181,11 @@ func (r *Resolver) ensureRepo(repositoryURL string) (string, error) {
 		return repositoryURL, nil
 	}
 
+	// OCI registries don't need repository setup like HTTP repos
+	if registry.IsOCI(repositoryURL) {
+		return repositoryURL, nil
+	}
+
 	if r.knownRepos[repositoryURL] {
 		return r.repoURLToName[repositoryURL], nil
 	}
@@ -265,7 +270,8 @@ func (r *Resolver) resolveChart(req *ChartResolveReq) (*ResolvedDependency, erro
 			return nil, fmt.Errorf("unable to create the new registry client: %w", err)
 		}
 
-		chartURL = req.repositoryURL
+		// Construct full OCI URL: repo + chart name  
+		chartURL = strings.TrimSuffix(req.repositoryURL, "/") + "/" + req.chartName
 		pull.Version = req.version
 	case strings.HasPrefix(req.repositoryURL, "file://") || req.repositoryURL == "":
 		resolvedChart := &ResolvedDependency{
@@ -517,9 +523,21 @@ func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]Resolved
 	}()
 
 	if repositoryURL == "" {
-		chartName, err = ensureAbsPath(chartName)
-		if err != nil {
-			return nil, err
+		if registry.IsOCI(chartName) {
+			// extract repository and chart from OCI URL
+			// oci://registry-1.docker.io/bitnamicharts/airflow -> 
+			// repo: oci://registry-1.docker.io/bitnamicharts, chart: airflow
+			repoURL, extractedChartName, err := parseOCIChartURL(chartName)
+			if err != nil {
+				return nil, fmt.Errorf("invalid OCI chart URL: %w", err)
+			}
+			repositoryURL = repoURL
+			chartName = extractedChartName
+		} else {
+			chartName, err = ensureAbsPath(chartName)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -539,6 +557,25 @@ func ensureAbsPath(p string) (string, error) {
 	}
 
 	return filepath.Abs(p)
+}
+
+func parseOCIChartURL(ociURL string) (repoURL, chartName string, err error) {
+	// oci://registry-1.docker.io/bitnamicharts/airflow
+	// -> repoURL: oci://registry-1.docker.io/bitnamicharts
+	// -> chartName: airflow
+
+	if !registry.IsOCI(ociURL) {
+		return "", "", fmt.Errorf("not an OCI URL: %s", ociURL)
+	}
+
+	parts := strings.Split(ociURL, "/")
+	if len(parts) < 4 {
+		return "", "", fmt.Errorf("invalid OCI URL format: %s", ociURL)
+	}
+
+	chartName = parts[len(parts)-1]
+	repoURL = strings.Join(parts[:len(parts)-1], "/")
+	return repoURL, chartName, nil
 }
 
 func parseManifestFile(content string) map[string]struct{} {
