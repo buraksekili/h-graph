@@ -17,34 +17,18 @@ func absPath(path, baseDir string) string {
 	return path
 }
 
-type findDepInChartsReq struct {
-	baseDir   string
-	chartName string
-	repo      string
-}
-
-func (l *findDepInChartsReq) validate() error {
-	if l.baseDir == "" {
-		return errors.New("baseDir is required")
-	}
-	if l.chartName == "" {
-		return errors.New("chartName is required")
-	}
-	return nil
-}
-
-// findDepInChartsDir looks for chart (specified in req.chartName) in the given chart's (which is located in currChartPath) `charts/` directory.
+// findDependencyInLocalCharts looks for chart (specified in req.chartName) in the given chart's (which is located in currChartPath) `charts/` directory.
 // It handles both directory format (remote charts) and .tgz format (local charts built with helm dep build).
-func findDepInChartsDir(currChartPath string, req *findDepInChartsReq) (*chart.Chart, string, error) {
+func findDependencyInLocalCharts(parentChartPath, chartName string) (*chart.Chart, string, error) {
 	// first, check if charts/ directory exists in the chart.
-	chartsDirPath := absPath("charts/", currChartPath)
-	if _, err := os.Stat(chartsDirPath); err != nil {
+	chartsDir := absPath("charts/", parentChartPath)
+	if _, err := os.Stat(chartsDir); err != nil {
 		return nil, "", errSkipLocalDeps
 	}
 
 	// try to find as a directory (remote chart format)
 	// Example: <actual_chart>/charts/<dependency_chart>/
-	depChartDirPath := absPath(req.chartName, chartsDirPath)
+	depChartDirPath := absPath(chartName, chartsDir)
 	if _, err := os.Stat(depChartDirPath); err == nil {
 		c, err := loader.Load(depChartDirPath)
 		if err != nil {
@@ -56,18 +40,18 @@ func findDepInChartsDir(currChartPath string, req *findDepInChartsReq) (*chart.C
 
 	// try to find as .tgz file (local chart format)
 	// Example: <actual_chart>/charts/<dependency_chart>-<dependency_chart_version>.tgz
-	pattern := filepath.Join(chartsDirPath, req.chartName+"-*.tgz")
-	matches, err := filepath.Glob(pattern)
+	tgzFilepath := filepath.Join(chartsDir, chartName+"-*.tgz")
+	matches, err := filepath.Glob(tgzFilepath)
 	if err != nil {
-		return nil, "", errors.Wrapf(err, "failed to glob pattern %s", pattern)
+		return nil, "", errors.Wrapf(err, "failed to glob pattern %s", tgzFilepath)
 	}
 
 	if len(matches) == 0 {
 		return nil, "", errors.Wrapf(
 			errSkipLocalDeps,
 			"chart %s not found in %s (tried directory and .tgz formats)",
-			req.chartName,
-			chartsDirPath,
+			chartName,
+			chartsDir,
 		)
 	}
 
@@ -88,7 +72,7 @@ func findDepInChartsDir(currChartPath string, req *findDepInChartsReq) (*chart.C
 	// for .tgz files, we need to return the source directory path instead of the .tgz path
 	// This is crucial for subsequent dependency resolution to work correctly
 	// The source directory is typically: charts/<chartname>/
-	sourceDirPath := filepath.Join(filepath.Dir(filepath.Dir(chartsDirPath)), req.chartName)
+	sourceDirPath := filepath.Join(filepath.Dir(filepath.Dir(chartsDir)), chartName)
 
 	// return the dependency chart with source directory path
 	return c, sourceDirPath, nil

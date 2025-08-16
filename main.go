@@ -28,21 +28,16 @@ import (
 )
 
 type ResolvedDependency struct {
-	Name        string       `json:"name"`
-	Version     string       `json:"version"`
-	Repository  string       `json:"repository"`
-	currentNode *currentNode `json:"-"`
-	parentDep   *parentDep   `json:"-"`
+	Name       string `json:"name"`
+	Version    string `json:"version"`
+	Repository string `json:"repository"`
+	node       *chartCtx
+	parentNode *chartCtx
 }
 
-type currentNode struct {
-	chart *chart.Chart
-	saved string
-}
-
-type parentDep struct {
-	chart *chart.Chart
-	saved string
+type chartCtx struct {
+	chart     *chart.Chart
+	chartPath string
 }
 
 func (d ResolvedDependency) String() string {
@@ -207,7 +202,7 @@ type exploreReq struct {
 	chartName     string
 	version       string
 	downloadPath  string
-	parentNode    *parentDep
+	parentNode    *chartCtx
 }
 
 func (e *exploreReq) validate() error {
@@ -224,7 +219,7 @@ func (e *exploreReq) validate() error {
 
 var errSkipLocalDeps = fmt.Errorf("skip local dependencies")
 
-func (r *Resolver) exploreNode(req *exploreReq) (*ResolvedDependency, error) {
+func (r *Resolver) resolveChart(req *exploreReq) (*ResolvedDependency, error) {
 	err := req.validate()
 	if err != nil {
 		return nil, err
@@ -279,25 +274,22 @@ func (r *Resolver) exploreNode(req *exploreReq) (*ResolvedDependency, error) {
 				return dep, errors.Wrap(errSkipLocalDeps, err.Error())
 			}
 
-			parent = &parentDep{
+			parent = &chartCtx{
 				chart: chartRequested,
 			}
 			parentChartPath = chartPath
 		} else {
-			parentChartPath = parent.saved
+			parentChartPath = parent.chartPath
 		}
 
-		c, chartPath, err := findDepInChartsDir(parentChartPath, &findDepInChartsReq{
-			baseDir:   parentChartPath,
-			chartName: req.chartName,
-		})
+		c, chartPath, err := findDependencyInLocalCharts(parentChartPath, req.chartName)
 		if err != nil {
 			return dep, errors.Wrap(errSkipLocalDeps, err.Error())
 		}
 
-		dep.currentNode = &currentNode{
-			chart: c,
-			saved: chartPath,
+		dep.node = &chartCtx{
+			chart:     c,
+			chartPath: chartPath,
 		}
 
 		// Add to dependencies list if this is not the root chart
@@ -369,9 +361,9 @@ func (r *Resolver) exploreNode(req *exploreReq) (*ResolvedDependency, error) {
 		Name:       chart.Name(),
 		Version:    chart.Metadata.Version,
 		Repository: req.repositoryURL,
-		currentNode: &currentNode{
-			chart: chart,
-			saved: extractedDir,
+		node: &chartCtx{
+			chart:     chart,
+			chartPath: extractedDir,
 		},
 	}
 
@@ -380,8 +372,8 @@ func (r *Resolver) exploreNode(req *exploreReq) (*ResolvedDependency, error) {
 	return &dep, nil
 }
 
-func (r *Resolver) images(dep *ResolvedDependency) error {
-	if dep.currentNode.chart == nil {
+func (r *Resolver) extractImagesFromChart(dep *ResolvedDependency) error {
+	if dep.node.chart == nil {
 		return nil
 	}
 
@@ -404,7 +396,7 @@ func (r *Resolver) images(dep *ResolvedDependency) error {
 	templateAction.ReleaseName = "hgraph"
 	templateAction.Namespace = "default"
 
-	release, err := templateAction.Run(dep.currentNode.chart, nil)
+	release, err := templateAction.Run(dep.node.chart, nil)
 	if err != nil {
 		return err
 	}
@@ -419,7 +411,7 @@ func (r *Resolver) images(dep *ResolvedDependency) error {
 }
 
 // resolveRecursive performs the actual recursive dependency resolution.
-func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, parentNode *parentDep) error {
+func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, parentNode *chartCtx) error {
 	_, err := r.ensureRepo(repositoryURL)
 	if err != nil {
 		if !errors.Is(err, errEmptyRepoURL) {
@@ -434,7 +426,7 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, pa
 
 	r.visited[uniqueID] = true
 
-	dep, err := r.exploreNode(&exploreReq{
+	dep, err := r.resolveChart(&exploreReq{
 		repositoryURL: repositoryURL,
 		chartName:     chartName,
 		version:       version,
@@ -450,19 +442,19 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, pa
 		return err
 	}
 
-	if dep.currentNode.chart == nil {
+	if dep.node.chart == nil {
 		return nil
 	}
 
-	err = r.images(dep)
+	err = r.extractImagesFromChart(dep)
 	if err != nil {
 		return err
 	}
 
-	deps := dep.currentNode.chart.Metadata.Dependencies
-	newParentNode := parentDep{
-		chart: dep.currentNode.chart,
-		saved: dep.currentNode.saved,
+	deps := dep.node.chart.Metadata.Dependencies
+	newParentNode := chartCtx{
+		chart:     dep.node.chart,
+		chartPath: dep.node.chartPath,
 	}
 
 	for _, subDep := range deps {
