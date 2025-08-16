@@ -4,15 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/pkg/errors"
 	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/registry"
 
 	"github.com/PaesslerAG/jsonpath"
@@ -83,6 +84,8 @@ type Resolver struct {
 	allImages    map[string]struct{}
 	imageToChart map[string]string
 	skippedDeps  []ResolvedDependency
+
+	tmpDirPath string
 }
 
 func NewResolver() *Resolver {
@@ -159,6 +162,13 @@ func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]Resolved
 		}
 	}()
 
+	if repositoryURL == "" {
+		chartName, err = ensureAbsPath(chartName)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	err = r.resolveRecursive(chartName, version, repositoryURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve dependencies: %w", err)
@@ -167,13 +177,29 @@ func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]Resolved
 	return r.dependencies, nil
 }
 
-func unpackChart(dst, src string) error {
-	err := chartutil.ExpandFile(dst, src)
-	if err != nil {
-		return err
+// GetLocalPath generates absolute local path when use
+// "file://" in repository of dependencies
+func GetLocalPath(repo, chartPath string) (string, error) {
+	var depPath string
+	var err error
+	p := strings.TrimPrefix(repo, "file://")
+
+	// root path is absolute
+	if strings.HasPrefix(p, "/") {
+		if depPath, err = filepath.Abs(p); err != nil {
+			return "", err
+		}
+	} else {
+		depPath = filepath.Join(chartPath, p)
 	}
 
-	return nil
+	if _, err = os.Stat(depPath); errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("directory %s not found", depPath)
+	} else if err != nil {
+		return "", err
+	}
+
+	return depPath, nil
 }
 
 type exploreReq struct {
@@ -189,8 +215,8 @@ func (e *exploreReq) validate() error {
 		return fmt.Errorf("exploreReq cannot be nil")
 	}
 
-	if e.repositoryURL == "" {
-		return fmt.Errorf("empty repositoryURL")
+	if e.repositoryURL == "" && e.chartName == "" {
+		return fmt.Errorf("both chart and repository URL cannot be empty at the same time")
 	}
 
 	return nil
@@ -232,23 +258,37 @@ func (r *Resolver) exploreNode(req *exploreReq) (*ResolvedDependency, error) {
 
 		chartURL = req.repositoryURL
 		pull.Version = req.version
-	case strings.HasPrefix(req.repositoryURL, "file://"):
+	case strings.HasPrefix(req.repositoryURL, "file://") || req.repositoryURL == "":
 		dep := &ResolvedDependency{
 			Name:       req.chartName,
 			Version:    req.version,
 			Repository: req.repositoryURL,
 		}
 
-		err = chartutil.ExpandFile(req.downloadPath, req.parentNode.saved)
-		if err != nil {
-			return dep, errors.Wrap(errSkipLocalDeps, err.Error())
+		parent := req.parentNode
+		parentChartPath := ""
+		if parent == nil {
+			// we are root
+			chartPath, err := ensureAbsPath(req.chartName)
+			if err != nil {
+				return dep, errors.Wrap(errSkipLocalDeps, err.Error())
+			}
+
+			chartRequested, err := loader.Load(chartPath) // chartRequested.metadata.version
+			if err != nil {
+				return dep, errors.Wrap(errSkipLocalDeps, err.Error())
+			}
+
+			parent = &parentDep{
+				chart: chartRequested,
+			}
+			parentChartPath = chartPath
+		} else {
+			parentChartPath = parent.saved
 		}
 
-		parentNode := absPath(req.parentNode.chart.Name(), req.downloadPath)
-		c, chartPath, err := lookDependenciesInCharts(parentNode, &loadChartReq{
-			baseDir:   parentNode,
+		c, chartPath, err := findDepInChartsDir(parentChartPath, &findDepInChartsReq{
 			chartName: req.chartName,
-			repo:      req.repositoryURL,
 		})
 		if err != nil {
 			return dep, errors.Wrap(errSkipLocalDeps, err.Error())
@@ -258,6 +298,12 @@ func (r *Resolver) exploreNode(req *exploreReq) (*ResolvedDependency, error) {
 			chart: c,
 			saved: chartPath,
 		}
+
+		// Add to dependencies list if this is not the root chart
+		if req.parentNode != nil {
+			r.dependencies = append(r.dependencies, *dep)
+		}
+
 		return dep, nil
 	default:
 		if repoFile != nil {
@@ -345,7 +391,7 @@ func (r *Resolver) images(dep *ResolvedDependency) error {
 
 	templateAction := action.NewInstall(actionConfig)
 	templateAction.DryRun = true
-	templateAction.ReleaseName = dep.Name
+	templateAction.ReleaseName = "hgraph"
 	templateAction.Namespace = "default"
 
 	release, err := templateAction.Run(dep.currentNode.chart, nil)
@@ -364,13 +410,11 @@ func (r *Resolver) images(dep *ResolvedDependency) error {
 
 // resolveRecursive performs the actual recursive dependency resolution.
 func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, parentNode *parentDep) error {
-	if repositoryURL == "" {
-		return nil
-	}
-
-	repoName, err := r.ensureRepo(repositoryURL)
+	_, err := r.ensureRepo(repositoryURL)
 	if err != nil {
-		return err
+		if !errors.Is(err, errEmptyRepoURL) {
+			return err
+		}
 	}
 
 	uniqueID := fmt.Sprintf("%s/%s:%s", repositoryURL, chartName, version)
@@ -380,7 +424,6 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, pa
 
 	r.visited[uniqueID] = true
 
-	chartRef := fmt.Sprintf("%s/%s", repoName, chartName)
 	dep, err := r.exploreNode(&exploreReq{
 		repositoryURL: repositoryURL,
 		chartName:     chartName,
@@ -394,7 +437,7 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, pa
 			return nil
 		}
 
-		return fmt.Errorf("could not download chart %s:%s from %s: %w", chartRef, version, repositoryURL, err)
+		return err
 	}
 
 	if dep.currentNode.chart == nil {
@@ -407,13 +450,13 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, pa
 	}
 
 	deps := dep.currentNode.chart.Metadata.Dependencies
+	newParentNode := parentDep{
+		chart: dep.currentNode.chart,
+		saved: dep.currentNode.saved,
+	}
 
 	for _, subDep := range deps {
-		parentNode := parentDep{
-			chart: dep.currentNode.chart,
-			saved: dep.currentNode.saved,
-		}
-		err := r.resolveRecursive(subDep.Name, subDep.Version, subDep.Repository, &parentNode)
+		err := r.resolveRecursive(subDep.Name, subDep.Version, subDep.Repository, &newParentNode)
 		if err != nil {
 			return err
 		}
@@ -521,8 +564,13 @@ var rootCmd = &cobra.Command{
 	Long:  `A powerful CLI tool built with Cobra to inspect Helm charts, list their dependencies, and visualize their dependency graph.`,
 }
 
+var errEmptyRepoURL = errors.New("empty repo URL")
+
 // ensureRepo automatically adds and updates a repository only if it's not already configured.
 func (r *Resolver) ensureRepo(repositoryURL string) (string, error) {
+	if repositoryURL == "" {
+		return "", errEmptyRepoURL
+	}
 	if strings.HasPrefix(repositoryURL, "file://") {
 		return repositoryURL, nil
 	}
@@ -586,53 +634,37 @@ var depsCmd = &cobra.Command{
 Use flags to specify the chart name, repository name, and repository URL.
 All three flags are required for dependency resolution.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		chartName, _ := cmd.Flags().GetString("name")
-		repoName, _ := cmd.Flags().GetString("repo-name")
-		repoURL, _ := cmd.Flags().GetString("repo-url")
+		// TODO: what happens if both repo and chart defined?
+		// tip: fallback to reading remote
+		repoURL, _ := cmd.Flags().GetString("repo")
+		chart, _ := cmd.Flags().GetString("chart")
 		version, _ := cmd.Flags().GetString("version")
 		format, _ := cmd.Flags().GetString("format")
 
-		if chartName == "" {
-			fmt.Println("❌ Chart name is required. Use --name flag.")
-			return
-		}
-		if repoName == "" {
-			fmt.Println("❌ Repository name is required. Use --repo-name flag.")
-			return
-		}
-		if repoURL == "" {
-			fmt.Println("❌ Repository URL is required. Use --repo-url flag.")
-			return
-		}
-		if version == "" {
-			fmt.Println("❌ Chart version is required. Use --version flag.")
-			return
-		}
-
-		// Validate format
-		if format != "text" && format != "json" {
-			fmt.Printf("❌ Invalid format '%s'. Supported formats: text, json\n", format)
+		if repoURL == "" && chart == "" {
+			fmt.Println("X Both Repository URL and Path empty, one of them is required.")
 			return
 		}
 
 		resolver := NewResolver()
 
-		// Set quiet mode for JSON format to avoid polluting stdout
 		if format == "json" {
 			resolver.SetQuietMode(true)
+		} else if format == "text" {
+			fmt.Printf("🔍 Resolving dependencies for chart: %s\n", chart)
 		} else {
-			fmt.Printf("🔍 Resolving dependencies for chart: %s\n", chartName)
-			fmt.Printf("📦 Repository: %s (%s)\n", repoName, repoURL)
+			fmt.Printf("❌ Invalid format '%s'. Supported formats: text, json\n", format)
+			return
 		}
 
-		resolved, err := resolver.Resolve(chartName, version, repoURL)
+		resolved, err := resolver.Resolve(chart, version, repoURL)
 		if err != nil {
 			log.Fatalf("❌ Resolution failed: %v", err)
 		}
 
 		switch format {
 		case "json":
-			report := resolver.GenerateReport(chartName, version, repoURL)
+			report := resolver.GenerateReport(chart, version, repoURL)
 			if err := resolver.OutputJSON(report); err != nil {
 				log.Fatalf("❌ Failed to output JSON: %v", err)
 			}
@@ -652,16 +684,10 @@ All three flags are required for dependency resolution.`,
 }
 
 func init() {
-	depsCmd.Flags().StringP("name", "n", "", "Chart name (required)")
-	depsCmd.Flags().StringP("repo-name", "r", "", "Repository name (required)")
-	depsCmd.Flags().StringP("repo-url", "u", "", "Repository URL (required)")
-	depsCmd.Flags().StringP("version", "v", "", "Chart version (required)")
+	depsCmd.Flags().StringP("chart", "c", "", "Chart name")
+	depsCmd.Flags().StringP("repo", "r", "", "Repository URL")
+	depsCmd.Flags().StringP("version", "v", "", "Chart version")
 	depsCmd.Flags().StringP("format", "f", "text", "Output format (text, json)")
-
-	depsCmd.MarkFlagRequired("name")
-	depsCmd.MarkFlagRequired("repo-name")
-	depsCmd.MarkFlagRequired("repo-url")
-	depsCmd.MarkFlagRequired("version")
 }
 
 func main() {
@@ -671,4 +697,75 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+}
+
+func loadChartDir(chartPath string) (*chart.Chart, error) {
+	if fi, err := os.Stat(chartPath); err != nil {
+		return nil, errors.Wrapf(err, "could not find %s", chartPath)
+	} else if !fi.IsDir() {
+		return nil, errors.New("only unpacked charts can be updated")
+	}
+
+	return loader.LoadDir(chartPath)
+}
+
+func locateLocalDependencies(baseChartPath string) ([]string, error) {
+	visited := make(map[string]bool)
+	deps, err := locateDepsRecursiveHelper(baseChartPath, visited)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, j := 0, len(deps)-1; i < j; i, j = i+1, j-1 {
+		deps[i], deps[j] = deps[j], deps[i]
+	}
+
+	return deps, nil
+}
+
+// locateDepsRecursiveHelper contains the core recursive logic.
+func locateDepsRecursiveHelper(chartPath string, visited map[string]bool) ([]string, error) {
+	if visited[chartPath] {
+		return []string{}, nil
+	}
+
+	visited[chartPath] = true
+
+	deps := []string{}
+
+	chart, err := loadChartDir(chartPath)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, dependency := range chart.Metadata.Dependencies {
+		if !strings.HasPrefix(dependency.Repository, "file://") {
+			continue
+		}
+
+		depPath, err := filepath.Abs(
+			filepath.Join(chartPath, dependency.Repository[7:]),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		deps = append(deps, depPath)
+
+		subDeps, err := locateDepsRecursiveHelper(depPath, visited)
+		if err != nil {
+			return nil, err
+		}
+		deps = append(deps, subDeps...)
+	}
+
+	return deps, nil
+}
+
+func ensureAbsPath(p string) (string, error) {
+	if filepath.IsAbs(p) {
+		return p, nil
+	}
+
+	return filepath.Abs(p)
 }
