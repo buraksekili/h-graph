@@ -197,7 +197,7 @@ func GetLocalPath(repo, chartPath string) (string, error) {
 	return depPath, nil
 }
 
-type exploreReq struct {
+type chartResolveReq struct {
 	repositoryURL string
 	chartName     string
 	version       string
@@ -205,9 +205,9 @@ type exploreReq struct {
 	parentNode    *chartCtx
 }
 
-func (e *exploreReq) validate() error {
+func (e *chartResolveReq) validate() error {
 	if e == nil {
-		return fmt.Errorf("exploreReq cannot be nil")
+		return fmt.Errorf("chartResolveReq cannot be nil")
 	}
 
 	if e.repositoryURL == "" && e.chartName == "" {
@@ -219,7 +219,7 @@ func (e *exploreReq) validate() error {
 
 var errSkipLocalDeps = fmt.Errorf("skip local dependencies")
 
-func (r *Resolver) resolveChart(req *exploreReq) (*ResolvedDependency, error) {
+func (r *Resolver) resolveChart(req *chartResolveReq) (*ResolvedDependency, error) {
 	err := req.validate()
 	if err != nil {
 		return nil, err
@@ -254,7 +254,7 @@ func (r *Resolver) resolveChart(req *exploreReq) (*ResolvedDependency, error) {
 		chartURL = req.repositoryURL
 		pull.Version = req.version
 	case strings.HasPrefix(req.repositoryURL, "file://") || req.repositoryURL == "":
-		dep := &ResolvedDependency{
+		resolvedChart := &ResolvedDependency{
 			Name:       req.chartName,
 			Version:    req.version,
 			Repository: req.repositoryURL,
@@ -266,12 +266,12 @@ func (r *Resolver) resolveChart(req *exploreReq) (*ResolvedDependency, error) {
 			// we are root
 			chartPath, err := ensureAbsPath(req.chartName)
 			if err != nil {
-				return dep, errors.Wrap(errSkipLocalDeps, err.Error())
+				return resolvedChart, errors.Wrap(errSkipLocalDeps, err.Error())
 			}
 
 			chartRequested, err := loader.Load(chartPath) // chartRequested.metadata.version
 			if err != nil {
-				return dep, errors.Wrap(errSkipLocalDeps, err.Error())
+				return resolvedChart, errors.Wrap(errSkipLocalDeps, err.Error())
 			}
 
 			parent = &chartCtx{
@@ -282,22 +282,22 @@ func (r *Resolver) resolveChart(req *exploreReq) (*ResolvedDependency, error) {
 			parentChartPath = parent.chartPath
 		}
 
-		c, chartPath, err := findDependencyInLocalCharts(parentChartPath, req.chartName)
+		loadedChart, chartPath, err := findDependencyInLocalCharts(parentChartPath, req.chartName)
 		if err != nil {
-			return dep, errors.Wrap(errSkipLocalDeps, err.Error())
+			return resolvedChart, errors.Wrap(errSkipLocalDeps, err.Error())
 		}
 
-		dep.node = &chartCtx{
-			chart:     c,
+		resolvedChart.node = &chartCtx{
+			chart:     loadedChart,
 			chartPath: chartPath,
 		}
 
 		// Add to dependencies list if this is not the root chart
 		if req.parentNode != nil {
-			r.dependencies = append(r.dependencies, *dep)
+			r.dependencies = append(r.dependencies, *resolvedChart)
 		}
 
-		return dep, nil
+		return resolvedChart, nil
 	default:
 		if repoFile != nil {
 			for _, repo := range repoFile.Repositories {
@@ -426,7 +426,7 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, pa
 
 	r.visited[uniqueID] = true
 
-	dep, err := r.resolveChart(&exploreReq{
+	dep, err := r.resolveChart(&chartResolveReq{
 		repositoryURL: repositoryURL,
 		chartName:     chartName,
 		version:       version,
