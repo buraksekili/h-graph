@@ -1,0 +1,6 @@
+dependencies:
+- name: chart-c
+  repository: file://../chart-c
+  version: 0.1.0
+digest: sha256:0ad4db08508ca8e64a6563ecdf462aad36cacac48fd0b309da88afe96b35a3f9
+generated: "2025-08-15T14:39:20.785537+03:00"
