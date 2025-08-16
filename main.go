@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 
 	"github.com/buraksekili/helm-dep-resolver/pkg/report"
@@ -18,10 +17,17 @@ var rootCmd = &cobra.Command{
 
 var depsCmd = &cobra.Command{
 	Use:   "deps",
-	Short: "Finds all chart and image dependencies for a given chart",
-	Long: `Finds all chart and image dependencies for a given chart.
-Use flags to specify the chart name, repository name, and repository URL.
-All three flags are required for dependency resolution.`,
+	Short: "Recursively resolves all chart dependencies and container images",
+	Long: `Recursively resolves all chart dependencies and container images for a given chart.
+Unlike helm dependency list which only shows direct dependencies, this command reveals 
+the complete transitive dependency tree and extracts all container images across all 
+dependency levels. Supports multiple chart sources: HTTP repositories, OCI registries, 
+and local paths.`,
+	Example: `  # Resolve remote chart dependencies
+  hg deps --chart ibb-promstack --repo https://ibbproject.github.io/helm-charts/ --format json
+
+  # Resolve local chart dependencies (ensure dependencies are built first)
+  hg deps --chart ./charts/chart-a --format json`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// TODO: what happens if both repo and chart defined?
 		// tip: fallback to reading remote
@@ -31,42 +37,54 @@ All three flags are required for dependency resolution.`,
 		format, _ := cmd.Flags().GetString("format")
 
 		if repoURL == "" && chart == "" {
-			fmt.Println("X Both Repository URL and Path empty, one of them is required.")
-			return
+			exitWithError(fmt.Errorf("both Repository URL and Path empty, one of them is required"))
 		}
 
 		if format != string(report.FormatJSON) && format != string(report.FormatText) {
-			fmt.Printf("❌ Invalid format '%s'. Supported formats: %s, %s\n", format, report.FormatText, report.FormatJSON)
-			return
+			exitWithError(fmt.Errorf("❌ Invalid format '%s'. Supported formats: %s, %s\n", format, report.FormatText, report.FormatJSON))
 		}
 
-		resolver := resolver.NewResolver(format)
-
-		resolved, err := resolver.Resolve(chart, version, repoURL)
+		err := runDeps(format, chart, version, repoURL)
 		if err != nil {
-			log.Fatalf("❌ Resolution failed: %v", err)
-		}
-
-		switch report.OutputFormat(format) {
-		case report.FormatJSON:
-			generator := report.NewGenerator(resolver)
-			reportData := generator.Generate(chart, version, repoURL)
-			if err := generator.OutputJSON(reportData); err != nil {
-				log.Fatalf("❌ Failed to output JSON: %v", err)
-			}
-		default:
-			fmt.Println("✅ Dependency resolution complete. Found unique dependencies:")
-			fmt.Println("--------------------------------------------------")
-			for _, dep := range resolved {
-				fmt.Println(dep.String())
-			}
-			fmt.Println("\n🐳 Container Images:")
-			fmt.Println("--------------------------------------------------")
-			for img := range resolver.AllImages {
-				fmt.Println(img)
-			}
+			exitWithError(err)
 		}
 	},
+}
+
+func exitWithError(err error) {
+	fmt.Printf("❌ Error: %v\n", err)
+	os.Exit(1)
+}
+
+func runDeps(format, chart, version, repoURL string) error {
+	resolver := resolver.NewResolver(format)
+
+	resolved, err := resolver.Resolve(chart, version, repoURL)
+	if err != nil {
+		return fmt.Errorf("resolution failed: %v", err)
+	}
+
+	switch report.OutputFormat(format) {
+	case report.FormatJSON:
+		generator := report.NewGenerator(resolver)
+		reportData := generator.Generate(chart, version, repoURL)
+		if err := generator.OutputJSON(reportData); err != nil {
+			return fmt.Errorf("failed to output JSON: %v", err)
+		}
+	default:
+		fmt.Println("✅ Dependency resolution complete. Found unique dependencies:")
+		fmt.Println("--------------------------------------------------")
+		for _, dep := range resolved {
+			fmt.Println(dep.String())
+		}
+		fmt.Println("\n🐳 Container Images:")
+		fmt.Println("--------------------------------------------------")
+		for img := range resolver.AllImages {
+			fmt.Println(img)
+		}
+	}
+
+	return nil
 }
 
 func init() {
