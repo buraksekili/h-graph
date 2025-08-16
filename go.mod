@@ -1,4 +1,4 @@
-module github.com/buraksekili/helm-dep-resolver
+module github.com/buraksekili/hgraph
 
 go 1.24.3
 

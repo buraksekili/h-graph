@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/buraksekili/helm-dep-resolver/pkg/report"
-	"github.com/buraksekili/helm-dep-resolver/pkg/resolver"
+	"github.com/buraksekili/hgraph/pkg/report"
+	"github.com/buraksekili/hgraph/pkg/resolver"
 	"github.com/spf13/cobra"
 )
 

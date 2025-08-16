@@ -3,7 +3,7 @@ package report
 import (
 	"time"
 
-	"github.com/buraksekili/helm-dep-resolver/pkg/resolver"
+	"github.com/buraksekili/hgraph/pkg/resolver"
 )
 
 // ImageInfo represents container image information in a report
