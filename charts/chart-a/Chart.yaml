@@ -27,9 +27,9 @@ dependencies:
   - name: chart-b
     version: "0.1.0"
     repository: "file://../chart-b"
-#  - name: chart-d
-#    version: "0.1.0"
-#    repository: "file://../chart-d"
-#  - name: ibb-promstack
-#    version: "0.2.0"
-#    repository: "https://ibbproject.github.io/helm-charts/"
+  - name: chart-d
+    version: "0.1.0"
+    repository: "file://../chart-d"
+  - name: ibb-promstack
+    version: "0.2.0"
+    repository: "https://ibbproject.github.io/helm-charts/"

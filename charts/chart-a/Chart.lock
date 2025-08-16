@@ -2,5 +2,11 @@ dependencies:
 - name: chart-b
   repository: file://../chart-b
   version: 0.1.0
-digest: sha256:bc6291293d2e841f6704dcd6632fcc6f51fa90bb9aee877cfa85909526d448e2
-generated: "2025-08-16T12:39:07.787137+03:00"
+- name: chart-d
+  repository: file://../chart-d
+  version: 0.1.0
+- name: ibb-promstack
+  repository: https://ibbproject.github.io/helm-charts/
+  version: 0.2.0
+digest: sha256:3774539866e16ffda9bbc8e619139bb183502151cb800c40a6b7ea2ec40ac0ab
+generated: "2025-08-16T15:12:24.507354+03:00"
