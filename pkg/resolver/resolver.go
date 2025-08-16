@@ -265,12 +265,19 @@ func (r *Resolver) resolveChart(req *ChartResolveReq) (*ResolvedDependency, erro
 
 	switch {
 	case registry.IsOCI(req.repositoryURL):
-		regClient, err = registry.NewClient(registry.ClientOptEnableCache(true))
+		clientOpts := []registry.ClientOption{
+			registry.ClientOptEnableCache(true),
+		}
+
+		if pull.Settings.RegistryConfig != "" {
+			clientOpts = append(clientOpts, registry.ClientOptCredentialsFile(pull.Settings.RegistryConfig))
+		}
+
+		regClient, err = registry.NewClient(clientOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create the new registry client: %w", err)
 		}
 
-		// Construct full OCI URL: repo + chart name  
 		chartURL = strings.TrimSuffix(req.repositoryURL, "/") + "/" + req.chartName
 		pull.Version = req.version
 	case strings.HasPrefix(req.repositoryURL, "file://") || req.repositoryURL == "":
@@ -525,7 +532,7 @@ func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]Resolved
 	if repositoryURL == "" {
 		if registry.IsOCI(chartName) {
 			// extract repository and chart from OCI URL
-			// oci://registry-1.docker.io/bitnamicharts/airflow -> 
+			// oci://registry-1.docker.io/bitnamicharts/airflow ->
 			// repo: oci://registry-1.docker.io/bitnamicharts, chart: airflow
 			repoURL, extractedChartName, err := parseOCIChartURL(chartName)
 			if err != nil {
