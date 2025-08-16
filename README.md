@@ -1,6 +1,6 @@
 # h-graph
 
-Recursively resolve ALL Helm chart dependencies and container images.
+Recursively resolve Helm chart dependencies and container images.
 
 ## Problem
 
@@ -15,7 +15,7 @@ chart-d         0.1.0   file://../chart-d                               ok
 ibb-promstack   0.2.0   https://ibbproject.github.io/helm-charts/       ok 
 ```
 
-**This breaks chart mirroring** for air-gapped environments - you mirror `chart-a` and `chart-b`, but miss `chart-c` and deployment fails.
+This breaks chart mirroring for air-gapped environments - you mirror `chart-a` and `chart-b`, but miss `chart-c`.
 
 ## Solution
 
