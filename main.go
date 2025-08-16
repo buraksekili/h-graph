@@ -288,6 +288,7 @@ func (r *Resolver) exploreNode(req *exploreReq) (*ResolvedDependency, error) {
 		}
 
 		c, chartPath, err := findDepInChartsDir(parentChartPath, &findDepInChartsReq{
+			baseDir:   parentChartPath,
 			chartName: req.chartName,
 		})
 		if err != nil {
@@ -355,13 +356,22 @@ func (r *Resolver) exploreNode(req *exploreReq) (*ResolvedDependency, error) {
 		return nil, fmt.Errorf("could not load chart from %s: %w", saved, err)
 	}
 
+	// for remote charts, we need to use the extracted directory path for dependency resolution,
+	// not the .tgz file path. The chart gets extracted to a directory with the chart name.
+	// From the debug output, we can see it's extracted to the working directory, not tmpChartsDir.
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get working directory: %w", err)
+	}
+	extractedDir := filepath.Join(wd, chart.Name())
+
 	dep := ResolvedDependency{
 		Name:       chart.Name(),
 		Version:    chart.Metadata.Version,
 		Repository: req.repositoryURL,
 		currentNode: &currentNode{
 			chart: chart,
-			saved: saved,
+			saved: extractedDir,
 		},
 	}
 
