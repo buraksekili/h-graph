@@ -222,3 +222,8 @@ $ ./hg deps --chart ./charts/chart-a --format json
 ```
 
 </details>
+
+## TODO
+
+- Support dependencies with alias
+ 
