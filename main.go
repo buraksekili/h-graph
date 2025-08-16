@@ -40,8 +40,7 @@ All three flags are required for dependency resolution.`,
 			return
 		}
 
-		quiet := format == string(report.FormatJSON)
-		resolver := resolver.NewResolver(format, quiet)
+		resolver := resolver.NewResolver(format)
 
 		resolved, err := resolver.Resolve(chart, version, repoURL)
 		if err != nil {

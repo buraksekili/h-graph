@@ -77,7 +77,31 @@ func createConsoleLogger() *zap.SugaredLogger {
 	return zap.New(core).Sugar()
 }
 
-func NewResolver(format string, quiet bool) *Resolver {
+func createMinimalProgressLogger() *zap.SugaredLogger {
+	config := zapcore.EncoderConfig{
+		TimeKey:       "",
+		LevelKey:      "",
+		MessageKey:    "msg",
+		CallerKey:     "",
+		StacktraceKey: "",
+		LineEnding:    zapcore.DefaultLineEnding,
+		EncodeLevel: func(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+		},
+		EncodeName:     zapcore.FullNameEncoder,
+		EncodeDuration: zapcore.StringDurationEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder,
+	}
+
+	core := zapcore.NewCore(
+		zapcore.NewConsoleEncoder(config),
+		zapcore.AddSync(os.Stderr),
+		zapcore.InfoLevel,
+	)
+
+	return zap.New(core).Sugar()
+}
+
+func NewResolver(format string) *Resolver {
 	settings := cli.New()
 
 	chartDownloader := downloader.ChartDownloader{
@@ -88,21 +112,11 @@ func NewResolver(format string, quiet bool) *Resolver {
 		RepositoryCache:  settings.RepositoryCache,
 	}
 
-	var logger *zap.SugaredLogger
-	if quiet {
-		logger = zap.NewNop().Sugar()
-	} else if format == "text" {
-		logger = createConsoleLogger()
-	} else {
-		// Silent for JSON format
-		logger = zap.NewNop().Sugar()
-	}
-
 	return &Resolver{
 		settings:        settings,
 		chartDownloader: &chartDownloader,
 		repoURLToName:   make(map[string]string),
-		logger:          logger,
+		logger:          initLogger(format),
 		knownRepos:      make(map[string]bool),
 		visited:         make(map[string]bool),
 		dependencies:    make([]ResolvedDependency, 0),
@@ -188,7 +202,7 @@ func (r *Resolver) ensureRepo(repositoryURL string) (string, error) {
 	}
 
 	if entry == nil {
-		r.logger.Infof("✨ Discovered new repository. Adding and updating: %s", repositoryURL)
+		r.logger.Infof("Adding repository: %s", repositoryURL)
 		parsedURL, err := url.Parse(repositoryURL)
 		if err != nil {
 			return "", fmt.Errorf("invalid repository URL: %s", repositoryURL)
@@ -481,7 +495,7 @@ func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]Resolved
 	r.dependencies = make([]ResolvedDependency, 0)
 	r.imageToChart = make(map[string]string)
 
-	r.logger.Infof("📦 Starting dependency resolution for chart: %s", chartName)
+	r.logger.Infof("Resolving chart dependencies...")
 
 	wd, err := os.Getwd()
 	if err != nil {
@@ -513,6 +527,8 @@ func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]Resolved
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve dependencies: %w", err)
 	}
+
+	r.logger.Infof("Completed. Found %d dependencies.", len(r.dependencies))
 
 	return r.dependencies, nil
 }
@@ -645,6 +661,18 @@ func absPath(path, baseDir string) string {
 		path = filepath.Join(baseDir, path)
 	}
 	return path
+}
+
+func initLogger(format string) *zap.SugaredLogger {
+	if format == "text" {
+		return createConsoleLogger()
+	}
+
+	if format == "json" {
+		return createMinimalProgressLogger()
+	}
+
+	return zap.NewNop().Sugar()
 }
 
 // GetDependencies implements report.DataProvider
