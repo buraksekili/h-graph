@@ -22,7 +22,7 @@ This breaks chart mirroring for air-gapped environments - you mirror `chart-a` a
 This tool provides recursive resolution:
 - All transitive dependencies (chart-a -> chart-b -> chart-c -> ...)
 - All container images across the entire dependency tree
-- Works with remote repositories, local charts, and mixed scenarios
+- Works with HTTP repositories, OCI registries, local charts, and mixed scenarios
 
 ## Usage
 
@@ -104,6 +104,73 @@ This tool provides recursive resolution:
     }
   ]
 }
+```
+
+</details>
+
+### Resolve OCI registry chart dependencies
+
+<details>
+
+```bash
+# Resolve OCI chart with transitive dependencies
+./hg deps --chart oci://registry-1.docker.io/bitnamicharts/airflow --version 25.0.1 --format json
+{
+  "chart": {
+    "name": "oci://registry-1.docker.io/bitnamicharts/airflow",
+    "version": "25.0.1",
+    "repository": ""
+  },
+  "dependencies": [
+    {
+      "name": "airflow",
+      "version": "25.0.1",
+      "repository": "oci://registry-1.docker.io/bitnamicharts"
+    },
+    {
+      "name": "redis",
+      "version": "22.0.3",
+      "repository": "oci://registry-1.docker.io/bitnamicharts"
+    },
+    {
+      "name": "common",
+      "version": "2.31.4",
+      "repository": "oci://registry-1.docker.io/bitnamicharts"
+    },
+    {
+      "name": "postgresql",
+      "version": "16.7.26",
+      "repository": "oci://registry-1.docker.io/bitnamicharts"
+    }
+  ],
+  "images": [
+    {
+      "name": "docker.io/bitnami/redis:8.2.0-debian-12-r0",
+      "source": "redis"
+    },
+    {
+      "name": "docker.io/bitnami/postgresql:17.6.0-debian-12-r0",
+      "source": "postgresql"
+    },
+    {
+      "name": "docker.io/bitnami/airflow:3.0.4-debian-12-r1",
+      "source": "airflow"
+    },
+    {
+      "name": "docker.io/bitnami/postgresql:17.5.0-debian-12-r20",
+      "source": "airflow"
+    }
+  ],
+  "summary": {
+    "total_dependencies": 4,
+    "total_images": 4,
+    "generated_at": "2025-08-16T19:48:29.53179+03:00"
+  },
+  "skipped_charts": []
+}
+
+# Also works without explicit version (uses latest)
+./hg deps --chart oci://registry-1.docker.io/bitnamicharts/airflow --format json
 ```
 
 </details>
@@ -222,6 +289,39 @@ $ ./hg deps --chart ./charts/chart-a --format json
 ```
 
 </details>
+
+## Authentication
+
+The tool automatically integrates with existing credential systems for accessing private OCI registries and repositories.
+
+### OCI Registry Authentication
+
+The tool supports multiple authentication methods for OCI registries (in priority order):
+
+1. **Helm Registry Login**:
+   ```bash
+   helm registry login registry-1.docker.io
+   ./hg deps --chart oci://registry-1.docker.io/private/chart --format json
+   ```
+
+2. **Docker Login**:
+   ```bash
+   docker login registry-1.docker.io
+   ./hg deps --chart oci://registry-1.docker.io/private/chart --format json
+   ```
+
+3. **Environment Variables** (registry-specific tokens)
+
+4. **Anonymous Access** (for public repositories)
+
+### HTTP Repository Authentication
+
+For traditional Helm repositories, authentication is handled via repository configuration:
+
+```bash
+helm repo add private-repo https://charts.example.com --username user --password pass
+./hg deps --chart my-chart --repo https://charts.example.com --format json
+```
 
 ## TODO
 
