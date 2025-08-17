@@ -10,9 +10,9 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "hg",
+	Use:   "h-graph",
 	Short: "A tool to analyze Helm chart dependencies and images.",
-	Long:  `A powerful CLI tool built with Cobra to inspect Helm charts, list their dependencies, and visualize their dependency graph.`,
+	Long:  `A CLI tool to resolve a Helm chart's full dependency tree, including all nested sub-charts, and discover every container image.`,
 }
 
 var depsCmd = &cobra.Command{
