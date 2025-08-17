@@ -228,8 +228,11 @@ func (r *Resolver) ensureRepo(repositoryURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("could not create repo for %s: %w", entry.Name, err)
 	}
-	if _, err := chartRepo.DownloadIndexFile(); err != nil { // todo: use manager here to update the repo
-		return "", fmt.Errorf("failed to update the repo: %w", err)
+
+	if !registry.IsOCI(entry.URL) {
+		if _, err := chartRepo.DownloadIndexFile(); err != nil { // todo: use manager here to update the repo
+			return "", fmt.Errorf("failed to update the repo: %w", err)
+		}
 	}
 
 	r.knownRepos[repositoryURL] = true
@@ -249,7 +252,8 @@ func (r *Resolver) resolveChart(req *ChartResolveReq) (*ResolvedDependency, erro
 	pull := action.NewPull()
 	pull.Untar = true
 	pull.UntarDir = tmpChartsDir
-	pull.Settings = cli.New()
+	pull.Settings = r.settings
+	pull.Version = req.version
 
 	var (
 		regClient *registry.Client
@@ -405,13 +409,11 @@ func (r *Resolver) extractImagesFromChart(dep *ResolvedDependency) error {
 	}
 
 	actionConfig := new(action.Configuration)
-	settings := r.settings
 
-	// TODO: look for better way to initialize this
 	err := actionConfig.Init(
-		settings.RESTClientGetter(),
-		settings.Namespace(),
-		os.Getenv("HELM_DRIVER"),
+		nil,
+		"default",
+		"",
 		func(format string, v ...interface{}) {},
 	)
 	if err != nil {
@@ -419,8 +421,8 @@ func (r *Resolver) extractImagesFromChart(dep *ResolvedDependency) error {
 	}
 
 	templateAction := action.NewInstall(actionConfig)
-	templateAction.DryRun = true
 	templateAction.ReleaseName = "hgraph"
+	templateAction.ClientOnly = true
 	templateAction.Namespace = "default"
 
 	release, err := templateAction.Run(dep.node.Chart, nil)
