@@ -1,4 +1,4 @@
-module github.com/buraksekili/hgraph
+module github.com/buraksekili/h-graph
 
 go 1.24.3
 

@@ -1,6 +1,6 @@
 package report
 
-import "github.com/buraksekili/hgraph/pkg/resolver"
+import "github.com/buraksekili/h-graph/pkg/resolver"
 
 // DataProvider defines the interface for accessing dependency resolution data
 type DataProvider interface {
