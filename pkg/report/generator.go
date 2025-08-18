@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/buraksekili/h-graph/pkg/resolver"
 )
 
 // Generator handles report creation and formatting
@@ -50,6 +52,25 @@ func (g *Generator) Generate(chartName, version, repositoryURL string) *Report {
 			GeneratedAt:       time.Now(),
 		},
 		SkippedCharts: skippedCharts,
+	}
+}
+
+func (g *Generator) GenerateError(chartName, version, repositoryURL, errorMsg string) *Report {
+	return &Report{
+		Chart: ChartInfo{
+			Name:       chartName,
+			Version:    version,
+			Repository: repositoryURL,
+		},
+		Dependencies:  []resolver.ResolvedDependency{},
+		Images:        []ImageInfo{},
+		Summary:       Summary{
+			TotalDependencies: 0,
+			TotalImages:       0,
+			GeneratedAt:       time.Now(),
+		},
+		SkippedCharts: []resolver.ResolvedDependency{},
+		Error:         errorMsg,
 	}
 }
 

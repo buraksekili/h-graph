@@ -33,4 +33,5 @@ type Report struct {
 	Images        []ImageInfo                   `json:"images"`
 	Summary       Summary                       `json:"summary"`
 	SkippedCharts []resolver.ResolvedDependency `json:"skipped_charts"`
+	Error         string                        `json:"error,omitempty"`
 }

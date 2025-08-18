@@ -37,22 +37,36 @@ and local paths.`,
 		format, _ := cmd.Flags().GetString("format")
 
 		if repoURL == "" && chart == "" {
-			exitWithError(fmt.Errorf("both Repository URL and Path empty, one of them is required"))
+			handleError(fmt.Errorf("both Repository URL and Path empty, one of them is required"), format, chart, version, repoURL)
+			return
 		}
 
 		if format != string(report.FormatJSON) && format != string(report.FormatText) {
-			exitWithError(fmt.Errorf("❌ Invalid format '%s'. Supported formats: %s, %s\n", format, report.FormatText, report.FormatJSON))
+			handleError(fmt.Errorf("❌ Invalid format '%s'. Supported formats: %s, %s\n", format, report.FormatText, report.FormatJSON), format, chart, version, repoURL)
+			return
 		}
 
 		err := runDeps(format, chart, version, repoURL)
 		if err != nil {
-			exitWithError(err)
+			handleError(err, format, chart, version, repoURL)
 		}
 	},
 }
 
 func exitWithError(err error) {
 	fmt.Printf("❌ Error: %v\n", err)
+	os.Exit(1)
+}
+
+func handleError(err error, format, chart, version, repoURL string) {
+	if format == string(report.FormatJSON) {
+		// Output JSON with error
+		generator := report.NewGenerator(nil)
+		errorReport := generator.GenerateError(chart, version, repoURL, err.Error())
+		generator.OutputJSON(errorReport)
+	} else {
+		exitWithError(err)
+	}
 	os.Exit(1)
 }
 
