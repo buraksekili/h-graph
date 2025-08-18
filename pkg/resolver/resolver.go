@@ -431,6 +431,13 @@ func (r *Resolver) extractImagesFromChart(dep *ResolvedDependency) error {
 	templateAction.ClientOnly = true
 	templateAction.Namespace = "default"
 
+	// Set a newer Kubernetes version for compatibility with modern charts
+	templateAction.KubeVersion = &chartutil.KubeVersion{
+		Version: "v1.28.0",
+		Major:   "1",
+		Minor:   "28",
+	}
+
 	release, err := templateAction.Run(dep.node.Chart, nil)
 	if err != nil {
 		return err
