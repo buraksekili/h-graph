@@ -15,6 +15,7 @@ import (
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
+	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/downloader"
 	"helm.sh/helm/v3/pkg/getter"
@@ -380,13 +381,18 @@ func (r *Resolver) resolveChart(req *ChartResolveReq) (*ResolvedDependency, erro
 	}
 
 	// for remote charts, we need to use the extracted directory path for dependency resolution,
-	// not the .tgz file path. The chart gets extracted to a directory with the chart name.
-	// From the debug output, we can see it's extracted to the working directory, not tmpChartsDir.
-	wd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get working directory: %w", err)
+	// not the .tgz file path. We need to extract the chart manually since DownloadTo() 
+	// doesn't handle the Untar option.
+	extractedDir := filepath.Join(tmpChartsDir, chart.Name())
+	
+	// Extract the chart if it's a .tgz file and the directory doesn't exist
+	if strings.HasSuffix(saved, ".tgz") || strings.HasSuffix(saved, ".tar.gz") {
+		if _, err := os.Stat(extractedDir); os.IsNotExist(err) {
+			if err := chartutil.ExpandFile(tmpChartsDir, saved); err != nil {
+				return nil, fmt.Errorf("failed to extract chart %s to %s: %w", saved, tmpChartsDir, err)
+			}
+		}
 	}
-	extractedDir := filepath.Join(wd, chart.Name())
 
 	dep := ResolvedDependency{
 		Name:       chart.Name(),
