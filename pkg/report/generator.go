@@ -62,9 +62,9 @@ func (g *Generator) GenerateError(chartName, version, repositoryURL, errorMsg st
 			Version:    version,
 			Repository: repositoryURL,
 		},
-		Dependencies:  []resolver.ResolvedDependency{},
-		Images:        []ImageInfo{},
-		Summary:       Summary{
+		Dependencies: []resolver.ResolvedDependency{},
+		Images:       []ImageInfo{},
+		Summary: Summary{
 			TotalDependencies: 0,
 			TotalImages:       0,
 			GeneratedAt:       time.Now(),

@@ -182,7 +182,9 @@ Note: Ensure that dependencies are built for local charts, via `helm dependency 
 <details>
 
 ```bash
-$ ./hg deps --chart ./charts/chart-a --format json
+$ ./hg deps --chart ./charts/chart-a --format json | jq
+Resolving chart dependencies...
+Completed. Found 10 dependencies.
 {
   "chart": {
     "name": "./charts/chart-a",
@@ -216,6 +218,11 @@ $ ./hg deps --chart ./charts/chart-a --format json
       "repository": "https://prometheus-community.github.io/helm-charts"
     },
     {
+      "name": "crds",
+      "version": "0.0.0",
+      "repository": ""
+    },
+    {
       "name": "kube-state-metrics",
       "version": "5.28.1",
       "repository": "https://prometheus-community.github.io/helm-charts"
@@ -229,9 +236,22 @@ $ ./hg deps --chart ./charts/chart-a --format json
       "name": "grafana",
       "version": "8.8.6",
       "repository": "https://grafana.github.io/helm-charts"
+    },
+    {
+      "name": "prometheus-windows-exporter",
+      "version": "0.7.1",
+      "repository": "https://prometheus-community.github.io/helm-charts"
     }
   ],
   "images": [
+    {
+      "name": "chart-a-image:1.16.0",
+      "source": "/Users/buraksekili/projects/helm-dep-resolver/charts/chart-a"
+    },
+    {
+      "name": "chart-c-image:1.16.0",
+      "source": "chart-c"
+    },
     {
       "name": "quay.io/prometheus/node-exporter:v1.8.2",
       "source": "prometheus-node-exporter"
@@ -241,19 +261,23 @@ $ ./hg deps --chart ./charts/chart-a --format json
       "source": "chart-d"
     },
     {
-      "name": "docker.io/grafana/grafana:11.4.0",
+      "name": "quay.io/kiwigrid/k8s-sidecar:1.28.0",
       "source": "kube-prometheus-stack"
+    },
+    {
+      "name": "quay.io/prometheus-operator/prometheus-operator:v0.79.2",
+      "source": "kube-prometheus-stack"
+    },
+    {
+      "name": "docker.io/grafana/grafana:11.4.1",
+      "source": "grafana"
     },
     {
       "name": "chart-a-init-container",
       "source": "/Users/buraksekili/projects/helm-dep-resolver/charts/chart-a"
     },
     {
-      "name": "chart-c-image:1.16.0",
-      "source": "chart-c"
-    },
-    {
-      "name": "quay.io/kiwigrid/k8s-sidecar:1.28.0",
+      "name": "docker.io/grafana/grafana:11.4.0",
       "source": "kube-prometheus-stack"
     },
     {
@@ -261,30 +285,16 @@ $ ./hg deps --chart ./charts/chart-a --format json
       "source": "kube-state-metrics"
     },
     {
-      "name": "chart-a-image:1.16.0",
-      "source": "/Users/buraksekili/projects/helm-dep-resolver/charts/chart-a"
-    },
-    {
-      "name": "docker.io/grafana/grafana:11.4.1",
-      "source": "grafana"
-    },
-    {
-      "name": "quay.io/prometheus-operator/prometheus-operator:v0.79.2",
-      "source": "kube-prometheus-stack"
+      "name": "ghcr.io/prometheus-community/windows-exporter:0.29.2",
+      "source": "prometheus-windows-exporter"
     }
   ],
   "summary": {
-    "total_dependencies": 8,
-    "total_images": 10,
-    "generated_at": "2025-08-16T16:04:22.751236+03:00"
+    "total_dependencies": 10,
+    "total_images": 11,
+    "generated_at": "2025-08-20T13:26:06.271464+03:00"
   },
-  "skipped_charts": [
-    {
-      "name": "crds",
-      "version": "0.0.0",
-      "repository": ""
-    }
-  ]
+  "skipped_charts": []
 }
 ```
 

@@ -381,16 +381,21 @@ func (r *Resolver) resolveChart(req *ChartResolveReq) (*ResolvedDependency, erro
 	}
 
 	// for remote charts, we need to use the extracted directory path for dependency resolution,
-	// not the .tgz file path. We need to extract the chart manually since DownloadTo() 
+	// not the .tgz file path. We need to extract the chart manually since DownloadTo()
 	// doesn't handle the Untar option.
 	extractedDir := filepath.Join(tmpChartsDir, chart.Name())
-	
+
 	// Extract the chart if it's a .tgz file and the directory doesn't exist
 	if strings.HasSuffix(saved, ".tgz") || strings.HasSuffix(saved, ".tar.gz") {
 		if _, err := os.Stat(extractedDir); os.IsNotExist(err) {
 			if err := chartutil.ExpandFile(tmpChartsDir, saved); err != nil {
 				return nil, fmt.Errorf("failed to extract chart %s to %s: %w", saved, tmpChartsDir, err)
 			}
+		}
+
+		chart, err = loader.Load(extractedDir)
+		if err != nil {
+			return nil, fmt.Errorf("could not reload chart from extracted directory %s: %w", extractedDir, err)
 		}
 	}
 
@@ -438,7 +443,13 @@ func (r *Resolver) extractImagesFromChart(dep *ResolvedDependency) error {
 		Minor:   "28",
 	}
 
-	release, err := templateAction.Run(dep.node.Chart, nil)
+	// Make a copy of the chart since templateAction.Run modifies the original chart
+	// This preserves the dependencies metadata for subsequent processing
+	chartCopy := *dep.node.Chart
+	metadataCopy := *dep.node.Chart.Metadata
+	chartCopy.Metadata = &metadataCopy
+
+	release, err := templateAction.Run(&chartCopy, nil)
 	if err != nil {
 		return err
 	}
@@ -500,6 +511,8 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, pa
 	}
 
 	for _, subDep := range deps {
+		// Process all dependencies regardless of conditions for complete dependency resolution
+		// This ensures we capture the full dependency tree that could potentially be activated
 		err := r.resolveRecursive(subDep.Name, subDep.Version, subDep.Repository, &newParentNode)
 		if err != nil {
 			return err
