@@ -292,31 +292,28 @@ func (r *Resolver) resolveChart(req *ChartResolveReq) (*ResolvedDependency, erro
 			Repository: req.repositoryURL,
 		}
 
-		parent := req.parentNode
-		parentChartPath := ""
-		if parent == nil {
-			// we are root
+		var loadedChart *chart.Chart
+		var chartPath string
+
+		if req.parentNode == nil {
+			// This is the root chart - load it directly
 			chartPath, err := ensureAbsPath(req.chartName)
 			if err != nil {
 				return resolvedChart, errors.Wrap(ErrSkipLocalDeps, err.Error())
 			}
 
-			chartRequested, err := loader.Load(chartPath) // chartRequested.metadata.version
+			loadedChart, err = loader.Load(chartPath)
 			if err != nil {
 				return resolvedChart, errors.Wrap(ErrSkipLocalDeps, err.Error())
 			}
-
-			parent = &ChartCtx{
-				Chart: chartRequested,
-			}
-			parentChartPath = chartPath
 		} else {
-			parentChartPath = parent.ChartPath
-		}
-
-		loadedChart, chartPath, err := findDependencyInLocalCharts(parentChartPath, req.chartName)
-		if err != nil {
-			return resolvedChart, errors.Wrap(ErrSkipLocalDeps, err.Error())
+			// This is a dependency - find it in the parent chart's charts/ directory
+			parentChartPath := req.parentNode.ChartPath
+			var err error
+			loadedChart, chartPath, err = findDependencyInLocalCharts(parentChartPath, req.chartName)
+			if err != nil {
+				return resolvedChart, errors.Wrap(ErrSkipLocalDeps, err.Error())
+			}
 		}
 
 		resolvedChart.node = &ChartCtx{
