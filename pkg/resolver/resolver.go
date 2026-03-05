@@ -440,10 +440,21 @@ func (r *Resolver) extractImagesFromChart(dep *ResolvedDependency) error {
 		Minor:   "28",
 	}
 
-	// Make a copy of the chart since templateAction.Run modifies the original chart
-	// This preserves the dependencies metadata for subsequent processing
+	// Make a deep copy of the chart since templateAction.Run modifies the original chart.
+	// This preserves the dependencies metadata for subsequent processing.
+	// IMPORTANT: We must deep-copy the Dependencies slice because Helm's Install.Run()
+	// mutates dependency entries (sets Name = Alias for aliased deps), and a shallow copy
+	// would corrupt the original chart's metadata.
 	chartCopy := *dep.node.Chart
 	metadataCopy := *dep.node.Chart.Metadata
+	if len(metadataCopy.Dependencies) > 0 {
+		depsCopy := make([]*chart.Dependency, len(metadataCopy.Dependencies))
+		for i, d := range metadataCopy.Dependencies {
+			depCopy := *d
+			depsCopy[i] = &depCopy
+		}
+		metadataCopy.Dependencies = depsCopy
+	}
 	chartCopy.Metadata = &metadataCopy
 
 	release, err := templateAction.Run(&chartCopy, nil)
