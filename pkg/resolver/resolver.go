@@ -40,6 +40,22 @@ type Resolver struct {
 	skippedDeps  []ResolvedDependency
 
 	tmpDirPath string
+
+	// renderValues are merged on top of chart defaults when rendering to extract
+	// images, so values-gated images (for example cert-manager acmesolver) are
+	// captured. Empty means render with chart defaults only, the historical behavior.
+	renderValues map[string]interface{}
+}
+
+// Option configures the Resolver.
+type Option func(*Resolver)
+
+// WithValues sets the values map merged on top of chart defaults during image
+// extraction. This surfaces images that only render under specific values.
+func WithValues(values map[string]interface{}) Option {
+	return func(r *Resolver) {
+		r.renderValues = values
+	}
 }
 
 func createConsoleLogger() *zap.SugaredLogger {
@@ -131,6 +147,10 @@ type ResolvedDependency struct {
 	Name       string `json:"name"`
 	Version    string `json:"version"`
 	Repository string `json:"repository"`
+	// Alias holds the dependency alias from the parent's Chart.yaml, if any.
+	// Helm renders the subchart and routes values under this key, so image
+	// provenance for aliased deps is recorded under the alias.
+	Alias      string `json:"alias,omitempty"`
 	node       *ChartCtx
 	parentNode *ChartCtx
 }
@@ -411,6 +431,24 @@ func (r *Resolver) resolveChart(req *ChartResolveReq) (*ResolvedDependency, erro
 	return &dep, nil
 }
 
+// coalesceValues builds the values list helm's render expects: a copy of the
+// chart's own defaults with the caller-supplied overrides merged on top.
+// nil overrides render with defaults only.
+func coalesceValues(ch *chart.Chart, overrides map[string]interface{}) (map[string]interface{}, error) {
+	defaults := ch.Values
+	if len(overrides) == 0 {
+		return defaults, nil
+	}
+
+	merged := make(map[string]interface{}, len(defaults))
+	for k, v := range defaults {
+		merged[k] = v
+	}
+
+	coalesced := chartutil.CoalesceTables(overrides, merged)
+	return coalesced, nil
+}
+
 func (r *Resolver) extractImagesFromChart(dep *ResolvedDependency) error {
 	if dep.node.Chart == nil {
 		return nil
@@ -457,22 +495,39 @@ func (r *Resolver) extractImagesFromChart(dep *ResolvedDependency) error {
 	}
 	chartCopy.Metadata = &metadataCopy
 
-	release, err := templateAction.Run(&chartCopy, nil)
+	// coalesceValues applies chart defaults first, then overlays the caller's
+	// renderValues so values-gated templates render their images.
+	renderVals, err := coalesceValues(&chartCopy, r.renderValues)
+	if err != nil {
+		return fmt.Errorf("coalescing render values: %w", err)
+	}
+
+	release, err := templateAction.Run(&chartCopy, renderVals)
 	if err != nil {
 		return err
 	}
 
-	imagesInChart := parseManifestFile(release.Manifest)
+	imagesInChart := parseManifestFile(release.Manifest, r.logger)
+	// provenance key: helm renders an aliased dependency under its alias and
+	// routes values that way, so attribute images to the alias when present.
+	provenance := dep.Name
+	if dep.Alias != "" {
+		provenance = dep.Alias
+	}
+
 	for img := range imagesInChart {
 		r.AllImages[img] = struct{}{}
-		r.imageToChart[img] = dep.Name
+		r.imageToChart[img] = provenance
 	}
 
 	return nil
 }
 
 // resolveRecursive performs the actual recursive dependency resolution.
-func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, parentNode *ChartCtx) error {
+// alias is the parent-declared alias for this dependency (empty when none);
+// helm renders the subchart and routes values under the alias, so provenance is
+// recorded under it.
+func (r *Resolver) resolveRecursive(chartName, version, repositoryURL, alias string, parentNode *ChartCtx) error {
 	_, err := r.ensureRepo(repositoryURL)
 	if err != nil {
 		if !errors.Is(err, ErrEmptyRepoURL) {
@@ -507,6 +562,12 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, pa
 		return nil
 	}
 
+	// record the parent-declared alias on the resolved dependency so image
+	// provenance and consumers can attribute it to the alias helm renders under
+	if alias != "" {
+		dep.Alias = alias
+	}
+
 	err = r.extractImagesFromChart(dep)
 	if err != nil {
 		return err
@@ -520,8 +581,10 @@ func (r *Resolver) resolveRecursive(chartName, version, repositoryURL string, pa
 
 	for _, subDep := range deps {
 		// Process all dependencies regardless of conditions for complete dependency resolution
-		// This ensures we capture the full dependency tree that could potentially be activated
-		err := r.resolveRecursive(subDep.Name, subDep.Version, subDep.Repository, &newParentNode)
+		// This ensures we capture the full dependency tree that could potentially be activated.
+		// subDep.Name is the real upstream chart name; subDep.Alias (if set) is the key helm
+		// renders and routes values under, so it is passed down as the provenance alias.
+		err := r.resolveRecursive(subDep.Name, subDep.Version, subDep.Repository, subDep.Alias, &newParentNode)
 		if err != nil {
 			return err
 		}
@@ -540,6 +603,15 @@ func (r *Resolver) SetQuietMode(quiet bool) {
 
 // Resolve is the public entry point for starting the dependency resolution process.
 func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]ResolvedDependency, error) {
+	return r.ResolveWithOptions(chartName, version, repositoryURL)
+}
+
+// ResolveWithOptions resolves the dependency tree applying the given options
+// (for example WithValues to surface values-gated images).
+func (r *Resolver) ResolveWithOptions(chartName, version, repositoryURL string, opts ...Option) ([]ResolvedDependency, error) {
+	for _, opt := range opts {
+		opt(r)
+	}
 	r.visited = make(map[string]bool)
 	r.dependencies = make([]ResolvedDependency, 0)
 	r.imageToChart = make(map[string]string)
@@ -584,7 +656,7 @@ func (r *Resolver) Resolve(chartName, version, repositoryURL string) ([]Resolved
 		}
 	}
 
-	err = r.resolveRecursive(chartName, version, repositoryURL, nil)
+	err = r.resolveRecursive(chartName, version, repositoryURL, "", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve dependencies: %w", err)
 	}
@@ -621,7 +693,19 @@ func parseOCIChartURL(ociURL string) (repoURL, chartName string, err error) {
 	return repoURL, chartName, nil
 }
 
-func parseManifestFile(content string) map[string]struct{} {
+// imageKinds are the workload kinds we inspect for image references. Adding a
+// kind here is the only change needed to broaden image extraction coverage.
+var imageKinds = map[string]struct{}{
+	"Deployment":  {},
+	"Pod":         {},
+	"Job":         {},
+	"StatefulSet": {},
+	"DaemonSet":   {},
+	"CronJob":     {},
+	"ReplicaSet":  {},
+}
+
+func parseManifestFile(content string, logger *zap.SugaredLogger) map[string]struct{} {
 	const imageQuery = "$..image"
 
 	uniqueImages := make(map[string]struct{})
@@ -646,13 +730,22 @@ func parseManifestFile(content string) map[string]struct{} {
 			continue
 		}
 
-		// check if kind is Deployment or Pod or Job or StatefulSet or DaemonSet
 		result, err := jsonpath.Get("$.kind", validData)
 		if err != nil {
 			continue
 		}
 
-		if kind, ok := result.(string); !ok || (kind != "Deployment" && kind != "Pod" && kind != "Job" && kind != "StatefulSet" && kind != "DaemonSet") {
+		kind, ok := result.(string)
+		if !ok {
+			continue
+		}
+
+		if _, allowed := imageKinds[kind]; !allowed {
+			// surface skipped kinds so blind spots stay visible without failing
+			if logger != nil {
+				logger.Debugf("skipping document of kind %q; not in image extraction set", kind)
+			}
+
 			continue
 		}
 

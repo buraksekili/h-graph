@@ -1,0 +1,10 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parent
+spec:
+  template:
+    spec:
+      containers:
+        - name: parent
+          image: docker.io/example/parent:1.0.0

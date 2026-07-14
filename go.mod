@@ -1,6 +1,6 @@
 module github.com/buraksekili/h-graph
 
-go 1.24.3
+go 1.26
 
 require (
 	github.com/PaesslerAG/jsonpath v0.1.1

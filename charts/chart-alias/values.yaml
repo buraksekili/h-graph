@@ -1,0 +1,3 @@
+gated-sidecar:
+  sidecar:
+    enabled: true

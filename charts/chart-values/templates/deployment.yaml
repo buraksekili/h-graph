@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: main
+spec:
+  template:
+    spec:
+      containers:
+        - name: main
+          image: docker.io/example/main:1.0.0
+{{- if .Values.sidecar.enabled }}
+        - name: sidecar
+          image: docker.io/example/sidecar:1.0.0
+{{- end }}
